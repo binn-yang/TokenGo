@@ -1,0 +1,20 @@
+listen: ":8443"
+ohttp_private_key_file: "./keys/ohttp_private.key"
+ai_backend:
+  url: "http://localhost:11434"
+  api_key: ""
+tls:
+  cert_file: "./certs/cert.pem"
+  key_file: "./certs/key.pem"
+
+dht:
+  enabled: true
+  bootstrap_peers:
+    - "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWRYkW2evPuvMRrQs3xKXW4UufuW41zz23tgU8G8NvMShj"
+  listen_addrs:
+    - "/ip4/127.0.0.1/tcp/4002"
+  external_addrs:
+    - "/ip4/127.0.0.1/tcp/8443"  # HTTPS 服务地址
+  private_key_file: "./keys/exit_identity.key/identity.key"
+  mode: "server"
+  use_ipfs_bootstrap: false

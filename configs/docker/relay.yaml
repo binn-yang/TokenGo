@@ -1,0 +1,6 @@
+listen: ":4433"
+exit: "exit:8443"  # Docker service name
+tls:
+  cert_file: "/etc/tokengo/certs/cert.pem"
+  key_file: "/etc/tokengo/certs/key.pem"
+insecure_skip_verify: true

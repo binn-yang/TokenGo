@@ -1,0 +1,20 @@
+listen: ":4433"
+exit: "localhost:8443"  # 回退地址
+tls:
+  cert_file: "./certs/cert.pem"
+  key_file: "./certs/key.pem"
+insecure_skip_verify: true
+
+dht:
+  enabled: true
+  bootstrap_peers:
+    - "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWRYkW2evPuvMRrQs3xKXW4UufuW41zz23tgU8G8NvMShj"
+  listen_addrs:
+    - "/ip4/127.0.0.1/tcp/4003"
+  private_key_file: "./keys/relay_identity.key/identity.key"
+  mode: "server"
+  use_ipfs_bootstrap: false
+
+fallback:
+  exit_addrs:
+    - "localhost:8443"

@@ -1,0 +1,7 @@
+dht:
+  enabled: true
+  listen_addrs:
+    - "/ip4/127.0.0.1/tcp/4001"
+  private_key_file: "./keys/identity.key"
+  mode: "server"
+  use_ipfs_bootstrap: false

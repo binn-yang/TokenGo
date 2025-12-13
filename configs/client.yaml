@@ -1,0 +1,27 @@
+# TokenGo Client 配置
+# 默认使用公共 IPFS DHT 发现节点，无需配置
+
+listen: "127.0.0.1:8080"
+timeout: 30s
+insecure_skip_verify: true  # 仅开发环境
+
+# DHT 配置 (默认启用公共 IPFS Bootstrap)
+dht:
+  enabled: true
+  use_ipfs_bootstrap: true
+  listen_addrs:
+    - "/ip4/0.0.0.0/tcp/0"
+
+# Bootstrap API (可选)
+# bootstrap:
+#   url: "https://bootstrap.example.com"
+#   interval: 2m
+
+# 回退地址 (可选，DHT 发现失败时使用)
+# fallback:
+#   relay_addrs:
+#     - "relay.example.com:4433"
+#   exits:
+#     - address: "exit.example.com:8443"
+#       public_key: "BASE64_KEY"
+#       key_id: 1

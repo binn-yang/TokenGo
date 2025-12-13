@@ -1,0 +1,19 @@
+# TokenGo Relay 配置 (盲转发模式)
+# Relay 不需要知道 Exit 地址，由 Client 指定
+
+listen: ":4433"
+tls:
+  cert_file: "./certs/cert.pem"
+  key_file: "./certs/key.pem"
+insecure_skip_verify: true  # 仅开发环境
+
+# DHT 配置 (可选，用于注册服务供 Client 发现)
+dht:
+  enabled: false
+  bootstrap_peers:
+    - "/ip4/127.0.0.1/tcp/4001/p2p/<BOOTSTRAP_PEER_ID>"
+  listen_addrs:
+    - "/ip4/0.0.0.0/tcp/4003"
+  private_key_file: "./keys/relay_identity.key"
+  mode: "server"
+  use_ipfs_bootstrap: false

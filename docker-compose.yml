@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  # AI Backend (Ollama)
+  # Comment out if using local Ollama instance
+  ollama:
+    image: ollama/ollama:latest
+    container_name: tokengo-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - tokengo
+
+  # Exit Node - OHTTP endpoint
+  exit:
+    build: .
+    container_name: tokengo-exit
+    command: exit --config /etc/tokengo/configs/docker/exit.yaml
+    depends_on:
+      ollama:
+        condition: service_healthy
+    ports:
+      - "8443:8443"
+    networks:
+      - tokengo
+    restart: unless-stopped
+
+  # Relay Node - QUIC proxy
+  relay:
+    build: .
+    container_name: tokengo-relay
+    command: relay --config /etc/tokengo/configs/docker/relay.yaml
+    depends_on:
+      - exit
+    ports:
+      - "4433:4433"
+    networks:
+      - tokengo
+    restart: unless-stopped
+
+  # Client - Local HTTP proxy
+  client:
+    build: .
+    container_name: tokengo-client
+    command: client --config /etc/tokengo/configs/docker/client.yaml
+    depends_on:
+      - relay
+    ports:
+      - "8080:8080"
+    networks:
+      - tokengo
+    restart: unless-stopped
+
+networks:
+  tokengo:
+    driver: bridge
+
+volumes:
+  ollama_data:

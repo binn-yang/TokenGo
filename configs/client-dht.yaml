@@ -1,0 +1,17 @@
+# TokenGo Client 配置 - DHT 发现模式
+
+listen: "127.0.0.1:8080"
+timeout: 30s
+insecure_skip_verify: true
+
+dht:
+  enabled: true
+  bootstrap_peers:
+    - "/ip4/127.0.0.1/tcp/4001/p2p/<BOOTSTRAP_PEER_ID>"
+  private_key_file: "./keys/client_identity.key"
+  mode: "client"
+  use_ipfs_bootstrap: true
+
+fallback:
+  relay_addrs:
+    - "localhost:4433"

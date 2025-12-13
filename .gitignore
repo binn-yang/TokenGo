@@ -1,0 +1,27 @@
+# Build artifacts
+build/
+tokengo
+*.exe
+
+# Keys and certificates (sensitive)
+keys/
+certs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test and coverage
+*.test
+*.out
+coverage.html
+
+# Temporary files
+*.tmp
+*.log

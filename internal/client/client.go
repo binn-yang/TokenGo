@@ -1,0 +1,396 @@
+package client
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"strings"
+	"sync"
+
+	"github.com/binn/tokengo/internal/crypto"
+	"github.com/binn/tokengo/internal/dht"
+	"github.com/binn/tokengo/internal/loadbalancer"
+	"github.com/binn/tokengo/internal/protocol"
+	"github.com/libp2p/go-libp2p/core/peer"
+	ma "github.com/multiformats/go-multiaddr"
+	"github.com/quic-go/quic-go"
+)
+
+// Client 客户端核心逻辑
+type Client struct {
+	relayAddr          string
+	exitAddr           string // Exit 节点地址 (由 Client 指定，Relay 盲转发)
+	ohttpClient        *crypto.OHTTPClient
+	conn               quic.Connection
+	connMu             sync.Mutex
+	tlsConfig          *tls.Config
+	dhtNode            *dht.Node
+	discovery          *dht.Discovery
+	selector           loadbalancer.Selector
+	fallbackRelayAddrs []string
+	currentRelayID     peer.ID
+}
+
+// NewClient 创建客户端 (静态模式)
+func NewClient(relayAddr, exitAddr string, keyID uint8, exitPublicKey []byte, insecureSkipVerify bool) (*Client, error) {
+	ohttpClient, err := crypto.NewOHTTPClient(keyID, exitPublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("创建 OHTTP 客户端失败: %w", err)
+	}
+
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: insecureSkipVerify,
+		NextProtos:         []string{"tokengo-relay"},
+		MinVersion:         tls.VersionTLS13,
+	}
+
+	return &Client{
+		relayAddr:   relayAddr,
+		exitAddr:    exitAddr,
+		ohttpClient: ohttpClient,
+		tlsConfig:   tlsConfig,
+		selector:    loadbalancer.NewWeightedSelector(),
+	}, nil
+}
+
+// NewClientDynamic 创建动态发现模式的客户端（不预设 Relay/Exit）
+func NewClientDynamic(insecureSkipVerify bool) (*Client, error) {
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: insecureSkipVerify,
+		NextProtos:         []string{"tokengo-relay"},
+		MinVersion:         tls.VersionTLS13,
+	}
+
+	return &Client{
+		tlsConfig: tlsConfig,
+		selector:  loadbalancer.NewWeightedSelector(),
+	}, nil
+}
+
+// NewClientWithDiscovery 创建支持 DHT 发现的客户端
+func NewClientWithDiscovery(dhtNode *dht.Node, exitAddr string, keyID uint8, exitPublicKey []byte, insecureSkipVerify bool, fallbackAddrs []string) (*Client, error) {
+	ohttpClient, err := crypto.NewOHTTPClient(keyID, exitPublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("创建 OHTTP 客户端失败: %w", err)
+	}
+
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: insecureSkipVerify,
+		NextProtos:         []string{"tokengo-relay"},
+		MinVersion:         tls.VersionTLS13,
+	}
+
+	return &Client{
+		exitAddr:           exitAddr,
+		ohttpClient:        ohttpClient,
+		tlsConfig:          tlsConfig,
+		dhtNode:            dhtNode,
+		discovery:          dht.NewDiscovery(dhtNode),
+		selector:           loadbalancer.NewWeightedSelector(),
+		fallbackRelayAddrs: fallbackAddrs,
+	}, nil
+}
+
+// connect 连接到 Relay 节点
+func (c *Client) connect(ctx context.Context) error {
+	// 关闭旧连接（如果存在）
+	if c.conn != nil {
+		c.conn.CloseWithError(0, "reconnecting")
+		c.conn = nil
+	}
+
+	// 如果启用了 DHT 发现
+	if c.discovery != nil {
+		return c.connectWithDiscovery(ctx)
+	}
+
+	// 静态模式
+	return c.connectToAddr(ctx, c.relayAddr, peer.ID(""))
+}
+
+// connectWithDiscovery 使用 DHT 发现连接
+func (c *Client) connectWithDiscovery(ctx context.Context) error {
+	// 尝试从 DHT 发现 Relay 节点
+	relays, err := c.discovery.DiscoverRelays(ctx)
+	if err != nil || len(relays) == 0 {
+		log.Printf("DHT 发现 Relay 失败，使用回退地址")
+		return c.connectWithFallback(ctx)
+	}
+
+	log.Printf("从 DHT 发现 %d 个 Relay 节点", len(relays))
+
+	// 选择一个 Relay 节点
+	selected, err := c.selector.Select(ctx, relays)
+	if err != nil {
+		return c.connectWithFallback(ctx)
+	}
+
+	// 提取地址
+	relayAddr := extractRelayAddress(selected.Addrs)
+	if relayAddr == "" {
+		c.selector.ReportFailure(selected.ID)
+		return c.connectWithFallback(ctx)
+	}
+
+	// 尝试连接
+	if err := c.connectToAddr(ctx, relayAddr, selected.ID); err != nil {
+		c.selector.ReportFailure(selected.ID)
+		return c.connectWithFallback(ctx)
+	}
+
+	c.selector.ReportSuccess(selected.ID)
+	c.currentRelayID = selected.ID
+	return nil
+}
+
+// connectWithFallback 使用回退地址连接
+func (c *Client) connectWithFallback(ctx context.Context) error {
+	for _, addr := range c.fallbackRelayAddrs {
+		if err := c.connectToAddr(ctx, addr, peer.ID("")); err == nil {
+			log.Printf("已连接到回退 Relay: %s", addr)
+			return nil
+		}
+		log.Printf("回退地址 %s 连接失败", addr)
+	}
+	return fmt.Errorf("所有 Relay 地址均不可用")
+}
+
+// connectToAddr 连接到指定地址
+func (c *Client) connectToAddr(ctx context.Context, addr string, peerID peer.ID) error {
+	quicConfig := &quic.Config{
+		MaxIdleTimeout:  120_000_000_000, // 120 秒
+		KeepAlivePeriod: 30_000_000_000,  // 30 秒
+	}
+
+	conn, err := quic.DialAddr(ctx, addr, c.tlsConfig, quicConfig)
+	if err != nil {
+		return fmt.Errorf("连接 Relay 失败: %w", err)
+	}
+
+	c.conn = conn
+	c.relayAddr = addr
+	c.currentRelayID = peerID
+	return nil
+}
+
+// extractRelayAddress 从 multiaddr 提取 IP:Port
+func extractRelayAddress(addrs []ma.Multiaddr) string {
+	for _, addr := range addrs {
+		addrStr := addr.String()
+		parts := strings.Split(addrStr, "/")
+		var ip, port string
+		for i := 0; i < len(parts)-1; i++ {
+			if parts[i] == "ip4" || parts[i] == "ip6" {
+				ip = parts[i+1]
+			}
+			if parts[i] == "tcp" || parts[i] == "udp" {
+				port = parts[i+1]
+			}
+		}
+		if ip != "" && port != "" {
+			return fmt.Sprintf("%s:%s", ip, port)
+		}
+	}
+	return ""
+}
+
+// Connect 公开的连接方法
+func (c *Client) Connect(ctx context.Context) error {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return c.connect(ctx)
+}
+
+// getConnection 获取或建立连接（已持有锁）
+func (c *Client) getConnection(ctx context.Context) (quic.Connection, error) {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+
+	// 检查连接是否有效
+	if c.conn != nil {
+		select {
+		case <-c.conn.Context().Done():
+			// 连接已关闭，需要重新连接
+		default:
+			return c.conn, nil
+		}
+	}
+
+	// 重新连接
+	if err := c.connect(ctx); err != nil {
+		return nil, err
+	}
+
+	return c.conn, nil
+}
+
+// SendRequest 发送 HTTP 请求
+func (c *Client) SendRequest(ctx context.Context, req *http.Request) (*http.Response, error) {
+	// 获取连接
+	conn, err := c.getConnection(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("获取连接失败: %w", err)
+	}
+
+	// 创建新流
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("创建流失败: %w", err)
+	}
+
+	// OHTTP 加密请求
+	ohttpReq, clientCtx, err := c.ohttpClient.EncapsulateRequest(req)
+	if err != nil {
+		stream.Close()
+		return nil, fmt.Errorf("加密请求失败: %w", err)
+	}
+
+	// 构建协议消息 (包含 Exit 目标地址)
+	msg := protocol.NewRequestMessage(c.exitAddr, ohttpReq)
+
+	// 发送请求
+	if _, err := stream.Write(msg.Encode()); err != nil {
+		stream.Close()
+		return nil, fmt.Errorf("发送请求失败: %w", err)
+	}
+
+	// 关闭写入端，表示请求发送完成（但保持读取端开放）
+	if err := stream.Close(); err != nil {
+		return nil, fmt.Errorf("关闭写入端失败: %w", err)
+	}
+
+	// 读取响应
+	respMsg, err := protocol.Decode(stream)
+	if err != nil {
+		return nil, fmt.Errorf("读取响应失败: %w", err)
+	}
+
+	// 检查响应类型
+	if respMsg.Type == protocol.MessageTypeError {
+		return nil, fmt.Errorf("服务端错误: %s", string(respMsg.Payload))
+	}
+
+	if respMsg.Type != protocol.MessageTypeResponse {
+		return nil, fmt.Errorf("无效的响应类型: %d", respMsg.Type)
+	}
+
+	// OHTTP 解密响应
+	resp, err := clientCtx.DecapsulateResponse(respMsg.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("解密响应失败: %w", err)
+	}
+
+	return resp, nil
+}
+
+// SendRequestRaw 发送原始 HTTP 请求并返回响应体
+func (c *Client) SendRequestRaw(ctx context.Context, method, path string, body []byte, headers map[string]string) ([]byte, int, error) {
+	// 构建请求
+	var bodyReader io.Reader
+	if len(body) > 0 {
+		bodyReader = bytes.NewReader(body)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, "http://ai-backend"+path, bodyReader)
+	if err != nil {
+		return nil, 0, fmt.Errorf("创建请求失败: %w", err)
+	}
+
+	// 设置 Content-Length
+	if len(body) > 0 {
+		req.ContentLength = int64(len(body))
+	}
+
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+
+	// 发送请求
+	resp, err := c.SendRequest(ctx, req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+
+	// 读取响应
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, 0, fmt.Errorf("读取响应体失败: %w", err)
+	}
+
+	return respBody, resp.StatusCode, nil
+}
+
+// Close 关闭客户端连接
+func (c *Client) Close() error {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+
+	// 停止 DHT 发现
+	if c.discovery != nil {
+		c.discovery.Stop()
+	}
+
+	if c.conn != nil {
+		err := c.conn.CloseWithError(0, "client closed")
+		c.conn = nil
+		return err
+	}
+	return nil
+}
+
+// StartDiscovery 启动后台服务发现
+func (c *Client) StartDiscovery() {
+	if c.discovery != nil {
+		c.discovery.Start()
+	}
+}
+
+// GetRelayAddr 获取当前连接的 Relay 地址
+func (c *Client) GetRelayAddr() string {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return c.relayAddr
+}
+
+// GetCurrentRelayID 获取当前连接的 Relay PeerID
+func (c *Client) GetCurrentRelayID() peer.ID {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return c.currentRelayID
+}
+
+// SetExit 设置 Exit 节点
+func (c *Client) SetExit(exitAddr string, keyID uint8, publicKey []byte) error {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+
+	c.exitAddr = exitAddr
+
+	// 重新创建 OHTTP 客户端
+	ohttpClient, err := crypto.NewOHTTPClient(keyID, publicKey)
+	if err != nil {
+		return fmt.Errorf("创建 OHTTP 客户端失败: %w", err)
+	}
+	c.ohttpClient = ohttpClient
+
+	return nil
+}
+
+// GetExitAddr 获取当前 Exit 地址
+func (c *Client) GetExitAddr() string {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return c.exitAddr
+}
+
+// SetRelay 设置 Relay 地址
+func (c *Client) SetRelay(relayAddr string) {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	c.relayAddr = relayAddr
+}
