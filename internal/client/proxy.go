@@ -221,8 +221,12 @@ func (p *LocalProxy) discoverAndConnect(ctx context.Context) error {
 	// Exit 回退：如果 DHT/Bootstrap 都没有发现 Exit，使用配置的回退 Exit
 	if exitInfo == nil && len(p.cfg.Fallback.Exits) > 0 {
 		fallbackExit := p.cfg.Fallback.Exits[0]
+		pubKeyBytes, err := fallbackExit.PublicKeyBytes()
+		if err != nil {
+			return fmt.Errorf("解码回退 Exit 公钥失败: %w", err)
+		}
 		exitInfo = &dht.ExitNodeInfo{
-			PublicKey: fallbackExit.PublicKey,
+			PublicKey: pubKeyBytes,
 			KeyID:     fallbackExit.KeyID,
 			Address:   fallbackExit.Address,
 		}
