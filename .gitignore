@@ -3,7 +3,7 @@
 
 # Build artifacts
 build/
-tokengo
+/tokengo
 *.exe
 
 # Keys and certificates (sensitive)
