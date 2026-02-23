@@ -14,6 +14,12 @@ const (
 	MessageTypeRequest MessageType = 0x01
 	// MessageTypeResponse OHTTP 响应
 	MessageTypeResponse MessageType = 0x02
+	// MessageTypeStreamRequest 流式请求 (格式同 Request，仅类型不同)
+	MessageTypeStreamRequest MessageType = 0x03
+	// MessageTypeStreamChunk 流式响应块 (加密后的 SSE 事件)
+	MessageTypeStreamChunk MessageType = 0x04
+	// MessageTypeStreamEnd 流式结束标记
+	MessageTypeStreamEnd MessageType = 0x05
 	// MessageTypeError 错误消息
 	MessageTypeError MessageType = 0xFF
 )
@@ -103,6 +109,30 @@ func NewResponseMessage(ohttpPayload []byte) *Message {
 	return &Message{
 		Type:    MessageTypeResponse,
 		Payload: ohttpPayload,
+	}
+}
+
+// NewStreamRequestMessage 创建流式请求消息
+func NewStreamRequestMessage(target string, ohttpPayload []byte) *Message {
+	return &Message{
+		Type:    MessageTypeStreamRequest,
+		Target:  target,
+		Payload: ohttpPayload,
+	}
+}
+
+// NewStreamChunkMessage 创建流式响应块消息
+func NewStreamChunkMessage(encryptedChunk []byte) *Message {
+	return &Message{
+		Type:    MessageTypeStreamChunk,
+		Payload: encryptedChunk,
+	}
+}
+
+// NewStreamEndMessage 创建流式结束标记消息
+func NewStreamEndMessage() *Message {
+	return &Message{
+		Type: MessageTypeStreamEnd,
 	}
 }
 

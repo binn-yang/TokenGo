@@ -170,6 +170,130 @@ func TestOHTTPKeyIDMismatch(t *testing.T) {
 	}
 }
 
+func TestStreamEncryptDecrypt(t *testing.T) {
+	// 生成密钥对
+	kp, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+
+	// 创建客户端和服务端
+	client, err := NewOHTTPClient(kp.KeyID, kp.PublicKey)
+	if err != nil {
+		t.Fatalf("NewOHTTPClient failed: %v", err)
+	}
+
+	server, err := NewOHTTPServer(kp.KeyID, kp.PrivateKey)
+	if err != nil {
+		t.Fatalf("NewOHTTPServer failed: %v", err)
+	}
+
+	// 执行一次 OHTTP 握手以建立 HPKE 会话
+	body := `{"model":"test","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	req, err := http.NewRequest("POST", "http://example.com/v1/chat/completions", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest failed: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = int64(len(body))
+
+	encryptedReq, clientCtx, err := client.EncapsulateRequest(req)
+	if err != nil {
+		t.Fatalf("EncapsulateRequest failed: %v", err)
+	}
+
+	_, serverCtx, err := server.DecapsulateRequest(encryptedReq)
+	if err != nil {
+		t.Fatalf("DecapsulateRequest failed: %v", err)
+	}
+
+	// 从会话派生流加密器和解密器
+	encryptor, err := serverCtx.NewStreamEncryptor()
+	if err != nil {
+		t.Fatalf("NewStreamEncryptor failed: %v", err)
+	}
+
+	decryptor, err := clientCtx.NewStreamDecryptor()
+	if err != nil {
+		t.Fatalf("NewStreamDecryptor failed: %v", err)
+	}
+
+	// 测试多个 SSE 事件加解密
+	events := []string{
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n",
+		"data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n",
+		"data: [DONE]\n\n",
+	}
+
+	for i, event := range events {
+		encrypted, err := encryptor.EncryptChunk([]byte(event))
+		if err != nil {
+			t.Fatalf("EncryptChunk[%d] failed: %v", i, err)
+		}
+
+		decrypted, err := decryptor.DecryptChunk(encrypted)
+		if err != nil {
+			t.Fatalf("DecryptChunk[%d] failed: %v", i, err)
+		}
+
+		if string(decrypted) != event {
+			t.Errorf("Chunk[%d]: got %q, want %q", i, string(decrypted), event)
+		}
+	}
+}
+
+func TestStreamEncryptorDifferentNonces(t *testing.T) {
+	// 验证每个 chunk 使用不同的 nonce
+	kp, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+
+	client, err := NewOHTTPClient(kp.KeyID, kp.PublicKey)
+	if err != nil {
+		t.Fatalf("NewOHTTPClient failed: %v", err)
+	}
+
+	server, err := NewOHTTPServer(kp.KeyID, kp.PrivateKey)
+	if err != nil {
+		t.Fatalf("NewOHTTPServer failed: %v", err)
+	}
+
+	body := `{"test":"stream"}`
+	req, _ := http.NewRequest("POST", "http://example.com/test", strings.NewReader(body))
+	req.ContentLength = int64(len(body))
+
+	encryptedReq, _, err := client.EncapsulateRequest(req)
+	if err != nil {
+		t.Fatalf("EncapsulateRequest failed: %v", err)
+	}
+
+	_, serverCtx, err := server.DecapsulateRequest(encryptedReq)
+	if err != nil {
+		t.Fatalf("DecapsulateRequest failed: %v", err)
+	}
+
+	encryptor, err := serverCtx.NewStreamEncryptor()
+	if err != nil {
+		t.Fatalf("NewStreamEncryptor failed: %v", err)
+	}
+
+	// 加密相同数据两次，密文应不同（因为随机 nonce）
+	data := []byte("same data")
+	ct1, err := encryptor.EncryptChunk(data)
+	if err != nil {
+		t.Fatalf("EncryptChunk 1 failed: %v", err)
+	}
+	ct2, err := encryptor.EncryptChunk(data)
+	if err != nil {
+		t.Fatalf("EncryptChunk 2 failed: %v", err)
+	}
+
+	if bytes.Equal(ct1, ct2) {
+		t.Error("Two encryptions of the same data produced identical ciphertext (nonce reuse)")
+	}
+}
+
 func TestDecodeKeyConfigInvalid(t *testing.T) {
 	// 测试空数据
 	_, _, err := DecodeKeyConfig([]byte{})

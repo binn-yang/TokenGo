@@ -119,6 +119,7 @@ func (e *ExitNode) Start() error {
 
 	// 注册 OHTTP 端点
 	mux.HandleFunc("/ohttp", e.ohttpHandler.HandleOHTTP)
+	mux.HandleFunc("/ohttp-stream", e.ohttpHandler.HandleOHTTPStream)
 	mux.HandleFunc("/ohttp-keys", e.ohttpHandler.HandleKeys)
 
 	// 健康检查端点

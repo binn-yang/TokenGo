@@ -12,6 +12,7 @@ import (
 // Forwarder 请求转发器 (盲转发模式：Exit 地址由 Client 指定)
 type Forwarder struct {
 	httpClient         *http.Client
+	streamClient       *http.Client // 无全局 Timeout，用于流式转发
 	insecureSkipVerify bool
 }
 
@@ -26,11 +27,26 @@ func NewForwarder(insecureSkipVerify bool) *Forwarder {
 		IdleConnTimeout:     90 * time.Second,
 	}
 
+	streamTransport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: insecureSkipVerify,
+		},
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   100,
+		IdleConnTimeout:       90 * time.Second,
+	}
+
 	return &Forwarder{
 		insecureSkipVerify: insecureSkipVerify,
 		httpClient: &http.Client{
 			Transport: transport,
 			Timeout:   120 * time.Second,
+		},
+		streamClient: &http.Client{
+			Transport: streamTransport,
+			// 不设全局 Timeout，SSE 连接持续时间不确定
 		},
 	}
 }
@@ -73,4 +89,35 @@ func (f *Forwarder) Forward(exitAddr string, ohttpReq []byte) ([]byte, error) {
 	}
 
 	return ohttpResp, nil
+}
+
+// ForwardStream 流式转发 - 将 Exit 响应直接管道到 writer
+func (f *Forwarder) ForwardStream(exitAddr string, ohttpReq []byte, dst io.Writer) error {
+	if exitAddr == "" {
+		return fmt.Errorf("Exit 地址为空")
+	}
+
+	exitURL := fmt.Sprintf("https://%s/ohttp-stream", exitAddr)
+
+	req, err := http.NewRequest(http.MethodPost, exitURL, bytes.NewReader(ohttpReq))
+	if err != nil {
+		return fmt.Errorf("创建请求失败: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "message/ohttp-req")
+
+	resp, err := f.streamClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("请求 Exit 节点失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Exit 节点返回错误: %d - %s", resp.StatusCode, string(body))
+	}
+
+	// 盲管道：Exit 写什么就转发什么，不解析
+	_, err = io.Copy(dst, resp.Body)
+	return err
 }
