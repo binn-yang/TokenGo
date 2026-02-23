@@ -20,6 +20,17 @@ const (
 	MessageTypeStreamChunk MessageType = 0x04
 	// MessageTypeStreamEnd 流式结束标记
 	MessageTypeStreamEnd MessageType = 0x05
+
+	// MessageTypeRegister Exit→Relay 注册 (Target=pubKeyHash)
+	MessageTypeRegister MessageType = 0x10
+	// MessageTypeRegisterAck Relay→Exit 注册确认
+	MessageTypeRegisterAck MessageType = 0x11
+
+	// MessageTypeHeartbeat Exit→Relay 心跳
+	MessageTypeHeartbeat MessageType = 0x20
+	// MessageTypeHeartbeatAck Relay→Exit 心跳确认
+	MessageTypeHeartbeatAck MessageType = 0x21
+
 	// MessageTypeError 错误消息
 	MessageTypeError MessageType = 0xFF
 )
@@ -27,7 +38,7 @@ const (
 // Message 通用消息结构
 type Message struct {
 	Type    MessageType
-	Target  string // 目标地址 (用于请求消息，如 "exit.example.com:8443")
+	Target  string // 目标标识 (请求消息中为 Exit pubKeyHash，注册消息中为 pubKeyHash)
 	Payload []byte
 }
 
@@ -141,5 +152,36 @@ func NewErrorMessage(errMsg string) *Message {
 	return &Message{
 		Type:    MessageTypeError,
 		Payload: []byte(errMsg),
+	}
+}
+
+// NewRegisterMessage 创建 Exit 注册消息
+func NewRegisterMessage(pubKeyHash string, payload []byte) *Message {
+	return &Message{
+		Type:    MessageTypeRegister,
+		Target:  pubKeyHash,
+		Payload: payload,
+	}
+}
+
+// NewRegisterAckMessage 创建注册确认消息
+func NewRegisterAckMessage(payload []byte) *Message {
+	return &Message{
+		Type:    MessageTypeRegisterAck,
+		Payload: payload,
+	}
+}
+
+// NewHeartbeatMessage 创建心跳消息
+func NewHeartbeatMessage() *Message {
+	return &Message{
+		Type: MessageTypeHeartbeat,
+	}
+}
+
+// NewHeartbeatAckMessage 创建心跳确认消息
+func NewHeartbeatAckMessage() *Message {
+	return &Message{
+		Type: MessageTypeHeartbeatAck,
 	}
 }

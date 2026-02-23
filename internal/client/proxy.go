@@ -82,8 +82,8 @@ func NewLocalProxy(cfg *config.ClientConfig) (*LocalProxy, error) {
 }
 
 // NewStaticProxy 创建静态模式代理 (用于 serve 命令)
-func NewStaticProxy(listen, relayAddr, exitAddr string, keyID uint8, publicKey []byte, insecureSkipVerify bool) (*LocalProxy, error) {
-	client, err := NewClient(relayAddr, exitAddr, keyID, publicKey, insecureSkipVerify)
+func NewStaticProxy(listen, relayAddr string, keyID uint8, publicKey []byte, insecureSkipVerify bool) (*LocalProxy, error) {
+	client, err := NewClient(relayAddr, keyID, publicKey, insecureSkipVerify)
 	if err != nil {
 		return nil, fmt.Errorf("创建客户端失败: %w", err)
 	}
@@ -131,7 +131,7 @@ func (p *LocalProxy) Start() error {
 			log.Printf("警告: 连接 Relay 失败: %v (将在首次请求时重试)", err)
 		} else {
 			log.Printf("已连接到 Relay: %s", p.client.GetRelayAddr())
-			log.Printf("Exit 节点: %s", p.client.GetExitAddr())
+			log.Printf("Exit 公钥哈希: %s", p.client.GetExitPubKeyHash())
 		}
 	}
 
@@ -180,7 +180,7 @@ func (p *LocalProxy) discoverAndConnect(ctx context.Context) error {
 		exits, err := discovery.DiscoverExitsWithKeys(ctx)
 		if err == nil && len(exits) > 0 {
 			exitInfo = &exits[0]
-			log.Printf("DHT 发现 Exit: %s (含公钥)", exitInfo.Address)
+			log.Printf("DHT 发现 Exit (含公钥, KeyID: %d)", exitInfo.KeyID)
 		} else {
 			log.Printf("DHT 发现 Exit 失败: %v", err)
 		}
@@ -205,9 +205,8 @@ func (p *LocalProxy) discoverAndConnect(ctx context.Context) error {
 			if len(exits) > 0 && exits[0].PublicKey != nil {
 				exitInfo = &dht.ExitNodeInfo{
 					PublicKey: exits[0].PublicKey,
-					Address:   exits[0].Address,
 				}
-				log.Printf("Bootstrap API 发现 Exit: %s (含公钥)", exitInfo.Address)
+				log.Printf("Bootstrap API 发现 Exit (含公钥)")
 			}
 		}
 	}
@@ -228,9 +227,8 @@ func (p *LocalProxy) discoverAndConnect(ctx context.Context) error {
 		exitInfo = &dht.ExitNodeInfo{
 			PublicKey: pubKeyBytes,
 			KeyID:     fallbackExit.KeyID,
-			Address:   fallbackExit.Address,
 		}
-		log.Printf("使用回退 Exit: %s", exitInfo.Address)
+		log.Printf("使用回退 Exit (KeyID: %d)", exitInfo.KeyID)
 	}
 
 	// 验证发现结果
@@ -242,10 +240,10 @@ func (p *LocalProxy) discoverAndConnect(ctx context.Context) error {
 	}
 
 	// 设置 Exit（公钥已在发现时获取）
-	if err := p.client.SetExit(exitInfo.Address, exitInfo.KeyID, exitInfo.PublicKey); err != nil {
+	if err := p.client.SetExit(exitInfo.KeyID, exitInfo.PublicKey); err != nil {
 		return fmt.Errorf("设置 Exit 失败: %w", err)
 	}
-	log.Printf("已选择 Exit 节点: %s", exitInfo.Address)
+	log.Printf("已选择 Exit 公钥哈希: %s", p.client.GetExitPubKeyHash())
 
 	// 设置 Relay 并连接
 	p.client.SetRelay(relayAddr)

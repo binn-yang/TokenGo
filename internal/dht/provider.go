@@ -29,7 +29,6 @@ const (
 type ExitKeyInfo struct {
 	KeyID     uint8  `json:"key_id"`
 	PublicKey []byte `json:"public_key"`
-	Address   string `json:"address"` // Exit 服务地址 (host:port)
 }
 
 // ServiceInfo 服务信息
@@ -133,17 +132,10 @@ func (p *Provider) storePublicKey(ctx context.Context) error {
 	// 构建 DHT key
 	key := ExitPubKeyPrefix + p.node.PeerID().String()
 
-	// 提取服务地址
-	address := ""
-	if len(p.serviceInfo.Addrs) > 0 {
-		address = p.serviceInfo.Addrs[0]
-	}
-
 	// 序列化公钥信息
 	info := ExitKeyInfo{
 		KeyID:     p.serviceInfo.KeyID,
 		PublicKey: p.serviceInfo.PublicKey,
-		Address:   address,
 	}
 	value, err := json.Marshal(info)
 	if err != nil {

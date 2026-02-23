@@ -23,7 +23,7 @@ import (
 // Client 客户端核心逻辑
 type Client struct {
 	relayAddr          string
-	exitAddr           string // Exit 节点地址 (由 Client 指定，Relay 盲转发)
+	exitPubKeyHash     string // Exit 公钥哈希 (由 Client 指定，Relay 盲转发)
 	ohttpClient        *crypto.OHTTPClient
 	conn               quic.Connection
 	connMu             sync.Mutex
@@ -36,7 +36,7 @@ type Client struct {
 }
 
 // NewClient 创建客户端 (静态模式)
-func NewClient(relayAddr, exitAddr string, keyID uint8, exitPublicKey []byte, insecureSkipVerify bool) (*Client, error) {
+func NewClient(relayAddr string, keyID uint8, exitPublicKey []byte, insecureSkipVerify bool) (*Client, error) {
 	ohttpClient, err := crypto.NewOHTTPClient(keyID, exitPublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("创建 OHTTP 客户端失败: %w", err)
@@ -49,11 +49,11 @@ func NewClient(relayAddr, exitAddr string, keyID uint8, exitPublicKey []byte, in
 	}
 
 	return &Client{
-		relayAddr:   relayAddr,
-		exitAddr:    exitAddr,
-		ohttpClient: ohttpClient,
-		tlsConfig:   tlsConfig,
-		selector:    loadbalancer.NewWeightedSelector(),
+		relayAddr:      relayAddr,
+		exitPubKeyHash: crypto.PubKeyHash(exitPublicKey),
+		ohttpClient:    ohttpClient,
+		tlsConfig:      tlsConfig,
+		selector:       loadbalancer.NewWeightedSelector(),
 	}, nil
 }
 
@@ -72,7 +72,7 @@ func NewClientDynamic(insecureSkipVerify bool) (*Client, error) {
 }
 
 // NewClientWithDiscovery 创建支持 DHT 发现的客户端
-func NewClientWithDiscovery(dhtNode *dht.Node, exitAddr string, keyID uint8, exitPublicKey []byte, insecureSkipVerify bool, fallbackAddrs []string) (*Client, error) {
+func NewClientWithDiscovery(dhtNode *dht.Node, keyID uint8, exitPublicKey []byte, insecureSkipVerify bool, fallbackAddrs []string) (*Client, error) {
 	ohttpClient, err := crypto.NewOHTTPClient(keyID, exitPublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("创建 OHTTP 客户端失败: %w", err)
@@ -85,7 +85,7 @@ func NewClientWithDiscovery(dhtNode *dht.Node, exitAddr string, keyID uint8, exi
 	}
 
 	return &Client{
-		exitAddr:           exitAddr,
+		exitPubKeyHash:     crypto.PubKeyHash(exitPublicKey),
 		ohttpClient:        ohttpClient,
 		tlsConfig:          tlsConfig,
 		dhtNode:            dhtNode,
@@ -249,8 +249,8 @@ func (c *Client) SendRequest(ctx context.Context, req *http.Request) (*http.Resp
 		return nil, fmt.Errorf("加密请求失败: %w", err)
 	}
 
-	// 构建协议消息 (包含 Exit 目标地址)
-	msg := protocol.NewRequestMessage(c.exitAddr, ohttpReq)
+	// 构建协议消息 (包含 Exit 公钥哈希)
+	msg := protocol.NewRequestMessage(c.exitPubKeyHash, ohttpReq)
 
 	// 发送请求
 	if _, err := stream.Write(msg.Encode()); err != nil {
@@ -337,8 +337,8 @@ func (c *Client) SendStreamRequest(ctx context.Context, req *http.Request) (*Str
 		return nil, fmt.Errorf("加密请求失败: %w", err)
 	}
 
-	// 发送 StreamRequest 消息 (包含 Exit 目标地址)
-	msg := protocol.NewStreamRequestMessage(c.exitAddr, ohttpReq)
+	// 发送 StreamRequest 消息 (包含 Exit 公钥哈希)
+	msg := protocol.NewStreamRequestMessage(c.exitPubKeyHash, ohttpReq)
 	if _, err := stream.Write(msg.Encode()); err != nil {
 		stream.Close()
 		return nil, fmt.Errorf("发送请求失败: %w", err)
@@ -438,12 +438,12 @@ func (c *Client) GetCurrentRelayID() peer.ID {
 	return c.currentRelayID
 }
 
-// SetExit 设置 Exit 节点
-func (c *Client) SetExit(exitAddr string, keyID uint8, publicKey []byte) error {
+// SetExit 设置 Exit 节点（自动计算公钥哈希）
+func (c *Client) SetExit(keyID uint8, publicKey []byte) error {
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
 
-	c.exitAddr = exitAddr
+	c.exitPubKeyHash = crypto.PubKeyHash(publicKey)
 
 	// 重新创建 OHTTP 客户端
 	ohttpClient, err := crypto.NewOHTTPClient(keyID, publicKey)
@@ -455,11 +455,11 @@ func (c *Client) SetExit(exitAddr string, keyID uint8, publicKey []byte) error {
 	return nil
 }
 
-// GetExitAddr 获取当前 Exit 地址
-func (c *Client) GetExitAddr() string {
+// GetExitPubKeyHash 获取当前 Exit 公钥哈希
+func (c *Client) GetExitPubKeyHash() string {
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
-	return c.exitAddr
+	return c.exitPubKeyHash
 }
 
 // SetRelay 设置 Relay 地址

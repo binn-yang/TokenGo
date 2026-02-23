@@ -27,7 +27,6 @@ type ExitNodeInfo struct {
 	peer.AddrInfo
 	PublicKey []byte // OHTTP 公钥
 	KeyID     uint8  // OHTTP KeyID
-	Address   string // Exit 服务地址 (host:port)
 }
 
 // Discovery 服务发现器
@@ -256,7 +255,6 @@ func (d *Discovery) DiscoverExitsWithKeys(ctx context.Context) ([]ExitNodeInfo, 
 			AddrInfo:  p,
 			PublicKey: keyInfo.PublicKey,
 			KeyID:     keyInfo.KeyID,
-			Address:   keyInfo.Address,
 		})
 	}
 

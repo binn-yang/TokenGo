@@ -190,13 +190,23 @@ Relay 采用盲转发模式：Exit 地址由 Client 在请求中指定，Relay �
 // exitCmd 出口节点命令
 func exitCmd() *cobra.Command {
 	var configPath string
-	var listen, backend, apiKey, privateKeyFile, certFile, keyFile string
+	var relayAddrs, backend, apiKey, privateKeyFile string
 	var headers []string
+	var insecure bool
 
 	cmd := &cobra.Command{
 		Use:   "exit",
 		Short: "启动出口节点 (OHTTP 网关)",
-		Long:  `启动出口节点，解密 OHTTP 请求并转发到 AI 后端。`,
+		Long: `启动出口节点，通过反向隧道连接 Relay，解密 OHTTP 请求并转发到 AI 后端。
+
+Exit 节点主动连接 Relay（无需公网 IP），通过 QUIC 反向隧道接收请求。
+
+示例:
+  # 连接到 Relay 并使用本地 Ollama
+  tokengo exit --relay relay.example.com:4433 --backend http://localhost:11434
+
+  # 连接多个 Relay (逗号分隔)
+  tokengo exit --relay relay1:4433,relay2:4433 --backend https://api.openai.com --api-key sk-xxx`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var cfg *config.ExitConfig
 			var err error
@@ -204,11 +214,15 @@ func exitCmd() *cobra.Command {
 			// 优先使用命令行参数
 			if backend != "" {
 				headerMap := parseHeaders(headers)
+				var relays []string
+				if relayAddrs != "" {
+					relays = strings.Split(relayAddrs, ",")
+				}
 				cfg = &config.ExitConfig{
-					Listen:              listen,
+					RelayAddrs:          relays,
 					OHTTPPrivateKeyFile: privateKeyFile,
 					AIBackend:           config.AIBackend{URL: backend, APIKey: apiKey, Headers: headerMap},
-					TLS:                 config.TLSConfig{CertFile: certFile, KeyFile: keyFile},
+					InsecureSkipVerify:  insecure,
 				}
 				// 如果没有指定密钥，自动生成
 				if privateKeyFile == "" {
@@ -219,19 +233,23 @@ func exitCmd() *cobra.Command {
 					}
 					log.Printf("Exit 公钥 (客户端配置用): %s", pubKey)
 				}
-				// 如果没有指定证书，自动生成
-				if certFile == "" {
-					cfg.TLS.CertFile = "certs/cert.pem"
-					cfg.TLS.KeyFile = "certs/key.pem"
-					if err := ensureCerts(cfg.TLS.CertFile, cfg.TLS.KeyFile); err != nil {
-						return err
-					}
-				}
 			} else {
 				cfg, err = config.LoadExitConfig(configPath)
 				if err != nil {
 					return fmt.Errorf("加载配置失败: %w", err)
 				}
+			}
+
+			// 命令行覆盖
+			if cmd.Flags().Changed("relay") {
+				cfg.RelayAddrs = strings.Split(relayAddrs, ",")
+			}
+			if cmd.Flags().Changed("insecure") {
+				cfg.InsecureSkipVerify = insecure
+			}
+
+			if len(cfg.RelayAddrs) == 0 {
+				return fmt.Errorf("必须指定 --relay 参数或配置 relay_addrs")
 			}
 
 			e, err := exit.New(cfg)
@@ -244,13 +262,12 @@ func exitCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&configPath, "config", "c", "configs/exit.yaml", "配置文件路径")
-	cmd.Flags().StringVarP(&listen, "listen", "l", ":8443", "监听地址")
+	cmd.Flags().StringVar(&relayAddrs, "relay", "", "Relay 地址列表 (逗号分隔，如 relay1:4433,relay2:4433)")
 	cmd.Flags().StringVarP(&backend, "backend", "b", "", "AI 后端地址 (如: http://localhost:11434)")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "AI 后端 API Key")
 	cmd.Flags().StringArrayVar(&headers, "header", nil, "自定义后端请求头 (格式: Key:Value，可多次指定)")
 	cmd.Flags().StringVar(&privateKeyFile, "private-key", "", "OHTTP 私钥文件")
-	cmd.Flags().StringVar(&certFile, "cert", "", "TLS 证书文件")
-	cmd.Flags().StringVar(&keyFile, "key", "", "TLS 私钥文件")
+	cmd.Flags().BoolVar(&insecure, "insecure", false, "跳过 TLS 证书验证")
 
 	return cmd
 }
@@ -297,15 +314,14 @@ func serveCmd() *cobra.Command {
 			}
 
 			// 配置
-			exitListen := ":8443"
 			relayListen := ":4433"
 
 			headerMap := parseHeaders(headers)
 			exitCfg := &config.ExitConfig{
-				Listen:              exitListen,
+				RelayAddrs:          []string{"127.0.0.1" + relayListen},
 				OHTTPPrivateKeyFile: privateKeyFile,
 				AIBackend:           config.AIBackend{URL: backend, APIKey: apiKey, Headers: headerMap},
-				TLS:                 config.TLSConfig{CertFile: certFile, KeyFile: keyFile},
+				InsecureSkipVerify:  true,
 			}
 
 			relayCfg := &config.RelayConfig{
@@ -320,18 +336,7 @@ func serveCmd() *cobra.Command {
 				return fmt.Errorf("解析 Exit 公钥失败: %w", err)
 			}
 
-			// 启动 Exit
-			e, err := exit.New(exitCfg)
-			if err != nil {
-				return fmt.Errorf("创建 Exit 节点失败: %w", err)
-			}
-			go func() {
-				if err := e.Start(); err != nil {
-					log.Fatalf("Exit 节点错误: %v", err)
-				}
-			}()
-
-			// 启动 Relay
+			// 启动 Relay (必须先启动，Exit 要连接它)
 			r, err := relay.New(relayCfg)
 			if err != nil {
 				return fmt.Errorf("创建 Relay 节点失败: %w", err)
@@ -342,11 +347,27 @@ func serveCmd() *cobra.Command {
 				}
 			}()
 
+			// 等待 Relay 就绪
+			time.Sleep(500 * time.Millisecond)
+
+			// 启动 Exit (通过反向隧道连接本地 Relay)
+			e, err := exit.New(exitCfg)
+			if err != nil {
+				return fmt.Errorf("创建 Exit 节点失败: %w", err)
+			}
+			go func() {
+				if err := e.Start(); err != nil {
+					log.Fatalf("Exit 节点错误: %v", err)
+				}
+			}()
+
+			// 等待 Exit 隧道建立
+			time.Sleep(500 * time.Millisecond)
+
 			// 启动 Client (静态模式)
 			proxy, err := client.NewStaticProxy(
 				listen,
 				"127.0.0.1"+relayListen,
-				"127.0.0.1"+exitListen,
 				keyID,
 				publicKey,
 				true, // insecureSkipVerify
