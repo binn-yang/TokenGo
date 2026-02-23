@@ -287,6 +287,80 @@ func (c *Client) SendRequest(ctx context.Context, req *http.Request) (*http.Resp
 	return resp, nil
 }
 
+// StreamResponse 封装流式响应读取
+type StreamResponse struct {
+	stream    quic.Stream
+	decryptor *crypto.StreamDecryptor
+}
+
+// ReadChunk 读取并解密下一个 SSE 事件，返回 io.EOF 表示流结束
+func (sr *StreamResponse) ReadChunk() ([]byte, error) {
+	msg, err := protocol.Decode(sr.stream)
+	if err != nil {
+		return nil, fmt.Errorf("读取流式响应失败: %w", err)
+	}
+
+	switch msg.Type {
+	case protocol.MessageTypeStreamChunk:
+		return sr.decryptor.DecryptChunk(msg.Payload)
+	case protocol.MessageTypeStreamEnd:
+		return nil, io.EOF
+	case protocol.MessageTypeError:
+		return nil, fmt.Errorf("服务端错误: %s", string(msg.Payload))
+	default:
+		return nil, fmt.Errorf("无效的流式响应类型: %d", msg.Type)
+	}
+}
+
+// Close 关闭流式响应
+func (sr *StreamResponse) Close() error {
+	sr.stream.CancelRead(0)
+	return nil
+}
+
+// SendStreamRequest 发送流式请求，返回可逐块解密的 StreamResponse
+func (c *Client) SendStreamRequest(ctx context.Context, req *http.Request) (*StreamResponse, error) {
+	conn, err := c.getConnection(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("获取连接失败: %w", err)
+	}
+
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("创建流失败: %w", err)
+	}
+
+	// OHTTP 加密请求
+	ohttpReq, clientCtx, err := c.ohttpClient.EncapsulateRequest(req)
+	if err != nil {
+		stream.Close()
+		return nil, fmt.Errorf("加密请求失败: %w", err)
+	}
+
+	// 发送 StreamRequest 消息 (包含 Exit 目标地址)
+	msg := protocol.NewStreamRequestMessage(c.exitAddr, ohttpReq)
+	if _, err := stream.Write(msg.Encode()); err != nil {
+		stream.Close()
+		return nil, fmt.Errorf("发送请求失败: %w", err)
+	}
+
+	// 关闭写入端，保持读取端开放
+	if err := stream.Close(); err != nil {
+		return nil, fmt.Errorf("关闭写入端失败: %w", err)
+	}
+
+	// 创建流解密器
+	decryptor, err := clientCtx.NewStreamDecryptor()
+	if err != nil {
+		return nil, fmt.Errorf("创建流解密器失败: %w", err)
+	}
+
+	return &StreamResponse{
+		stream:    stream,
+		decryptor: decryptor,
+	}, nil
+}
+
 // SendRequestRaw 发送原始 HTTP 请求并返回响应体
 func (c *Client) SendRequestRaw(ctx context.Context, method, path string, body []byte, headers map[string]string) ([]byte, int, error) {
 	// 构建请求

@@ -44,6 +44,28 @@ type Usage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
+// ChatCompletionChunk 流式响应块
+type ChatCompletionChunk struct {
+	ID      string        `json:"id"`
+	Object  string        `json:"object"`
+	Created int64         `json:"created"`
+	Model   string        `json:"model"`
+	Choices []ChunkChoice `json:"choices"`
+}
+
+// ChunkChoice 流式响应选项
+type ChunkChoice struct {
+	Index        int          `json:"index"`
+	Delta        DeltaContent `json:"delta"`
+	FinishReason *string      `json:"finish_reason"`
+}
+
+// DeltaContent 流式增量内容
+type DeltaContent struct {
+	Role    string `json:"role,omitempty"`
+	Content string `json:"content,omitempty"`
+}
+
 // Model 模型信息
 type Model struct {
 	ID      string `json:"id"`

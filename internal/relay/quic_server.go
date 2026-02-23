@@ -124,6 +124,8 @@ func (s *QUICServer) handleStream(stream quic.Stream) {
 	switch msg.Type {
 	case protocol.MessageTypeRequest:
 		s.handleForwardRequest(stream, msg)
+	case protocol.MessageTypeStreamRequest:
+		s.handleStreamForwardRequest(stream, msg)
 	default:
 		log.Printf("无效的消息类型: %d", msg.Type)
 		errMsg := protocol.NewErrorMessage("invalid message type")
@@ -155,6 +157,23 @@ func (s *QUICServer) handleForwardRequest(stream quic.Stream, msg *protocol.Mess
 	respMsg := protocol.NewResponseMessage(ohttpResp)
 	if _, err := stream.Write(respMsg.Encode()); err != nil {
 		log.Printf("写入响应失败: %v", err)
+	}
+}
+
+// handleStreamForwardRequest 处理流式转发请求
+func (s *QUICServer) handleStreamForwardRequest(stream quic.Stream, msg *protocol.Message) {
+	if msg.Target == "" {
+		log.Printf("流式请求缺少目标地址")
+		errMsg := protocol.NewErrorMessage("missing target address")
+		stream.Write(errMsg.Encode())
+		return
+	}
+
+	// 流式转发：Exit 的响应直接管道到 QUIC stream
+	if err := s.forwarder.ForwardStream(msg.Target, msg.Payload, stream); err != nil {
+		log.Printf("流式转发失败: %v", err)
+		errMsg := protocol.NewErrorMessage("stream forwarding failed")
+		stream.Write(errMsg.Encode())
 	}
 }
 

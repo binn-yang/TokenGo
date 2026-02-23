@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -301,9 +302,9 @@ func (p *LocalProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// 检查是否请求流式响应 (MVP 不支持)
+	// 检查是否请求流式响应
 	if req.Stream {
-		p.writeError(w, "暂不支持流式响应", http.StatusNotImplemented)
+		p.handleStreamingRequest(w, r, body)
 		return
 	}
 
@@ -326,6 +327,57 @@ func (p *LocalProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	w.Write(respBody)
+}
+
+// handleStreamingRequest 处理流式请求
+func (p *LocalProxy) handleStreamingRequest(w http.ResponseWriter, r *http.Request, body []byte) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		p.writeError(w, "Streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	// 构建 HTTP 请求转发到 AI 后端
+	httpReq, err := http.NewRequestWithContext(r.Context(), "POST", "http://ai-backend/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		p.writeError(w, "创建请求失败", http.StatusInternalServerError)
+		return
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.ContentLength = int64(len(body))
+
+	// 发送流式请求
+	streamResp, err := p.client.SendStreamRequest(r.Context(), httpReq)
+	if err != nil {
+		log.Printf("流式请求失败: %v", err)
+		p.writeError(w, "AI 服务请求失败", http.StatusBadGateway)
+		return
+	}
+	defer streamResp.Close()
+
+	// 设置 SSE 响应头
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	// 逐块读取并转发
+	for {
+		chunk, err := streamResp.ReadChunk()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			log.Printf("读取流式块失败: %v", err)
+			break
+		}
+		if _, err := w.Write(chunk); err != nil {
+			log.Printf("写入流式响应失败: %v", err)
+			break
+		}
+		flusher.Flush()
+	}
 }
 
 // handleModels 处理模型列表请求

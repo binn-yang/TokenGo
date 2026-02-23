@@ -291,7 +291,7 @@ DHT.PutValue("/tokengo/exit-pubkey/<peerID>", {keyID, publicKey, address})  # �
 
 ## 待办事项
 
-- [ ] 流式响应支持
+- [x] 流式响应支持 (SSE 分块加密)
 - [ ] 多 Exit 节点负载均衡
 - [x] DHT 节点发现（Exit 公钥存储/获取）
 - [x] TLS 证书自动生成
