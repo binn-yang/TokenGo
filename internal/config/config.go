@@ -49,8 +49,9 @@ type TLSConfig struct {
 
 // AIBackend AI 后端配置
 type AIBackend struct {
-	URL    string `yaml:"url"`
-	APIKey string `yaml:"api_key"`
+	URL     string            `yaml:"url"`
+	APIKey  string            `yaml:"api_key"`
+	Headers map[string]string `yaml:"headers,omitempty"`
 }
 
 // DHTConfig DHT 配置

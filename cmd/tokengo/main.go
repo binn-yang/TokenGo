@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -190,6 +191,7 @@ Relay 采用盲转发模式：Exit 地址由 Client 在请求中指定，Relay �
 func exitCmd() *cobra.Command {
 	var configPath string
 	var listen, backend, apiKey, privateKeyFile, certFile, keyFile string
+	var headers []string
 
 	cmd := &cobra.Command{
 		Use:   "exit",
@@ -201,10 +203,11 @@ func exitCmd() *cobra.Command {
 
 			// 优先使用命令行参数
 			if backend != "" {
+				headerMap := parseHeaders(headers)
 				cfg = &config.ExitConfig{
 					Listen:              listen,
 					OHTTPPrivateKeyFile: privateKeyFile,
-					AIBackend:           config.AIBackend{URL: backend, APIKey: apiKey},
+					AIBackend:           config.AIBackend{URL: backend, APIKey: apiKey, Headers: headerMap},
 					TLS:                 config.TLSConfig{CertFile: certFile, KeyFile: keyFile},
 				}
 				// 如果没有指定密钥，自动生成
@@ -244,6 +247,7 @@ func exitCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&listen, "listen", "l", ":8443", "监听地址")
 	cmd.Flags().StringVarP(&backend, "backend", "b", "", "AI 后端地址 (如: http://localhost:11434)")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "AI 后端 API Key")
+	cmd.Flags().StringArrayVar(&headers, "header", nil, "自定义后端请求头 (格式: Key:Value，可多次指定)")
 	cmd.Flags().StringVar(&privateKeyFile, "private-key", "", "OHTTP 私钥文件")
 	cmd.Flags().StringVar(&certFile, "cert", "", "TLS 证书文件")
 	cmd.Flags().StringVar(&keyFile, "key", "", "TLS 私钥文件")
@@ -254,6 +258,7 @@ func exitCmd() *cobra.Command {
 // serveCmd 一体化服务命令
 func serveCmd() *cobra.Command {
 	var listen, backend, apiKey string
+	var headers []string
 
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -266,6 +271,10 @@ func serveCmd() *cobra.Command {
 
   # 启动服务，连接 OpenAI API
   tokengo serve --backend https://api.openai.com --api-key sk-xxx
+
+  # 启动服务，连接 Claude API
+  tokengo serve --backend https://api.anthropic.com \
+    --header "x-api-key:sk-ant-xxx" --header "anthropic-version:2023-06-01"
 
   # 指定监听端口
   tokengo serve --listen :8080 --backend http://localhost:11434`,
@@ -291,10 +300,11 @@ func serveCmd() *cobra.Command {
 			exitListen := ":8443"
 			relayListen := ":4433"
 
+			headerMap := parseHeaders(headers)
 			exitCfg := &config.ExitConfig{
 				Listen:              exitListen,
 				OHTTPPrivateKeyFile: privateKeyFile,
-				AIBackend:           config.AIBackend{URL: backend, APIKey: apiKey},
+				AIBackend:           config.AIBackend{URL: backend, APIKey: apiKey, Headers: headerMap},
 				TLS:                 config.TLSConfig{CertFile: certFile, KeyFile: keyFile},
 			}
 
@@ -372,6 +382,7 @@ func serveCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&listen, "listen", "l", ":8080", "本地 API 监听地址")
 	cmd.Flags().StringVarP(&backend, "backend", "b", "", "AI 后端地址 (必需)")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "AI 后端 API Key")
+	cmd.Flags().StringArrayVar(&headers, "header", nil, "自定义后端请求头 (格式: Key:Value，可多次指定)")
 
 	return cmd
 }
@@ -485,6 +496,21 @@ func generateIdentityKey(outputDir string) error {
 	log.Printf("  PeerID: %s", id.PeerID)
 
 	return nil
+}
+
+// parseHeaders 解析 Key:Value 格式的 headers 列表为 map
+func parseHeaders(headers []string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(headers))
+	for _, h := range headers {
+		idx := strings.IndexByte(h, ':')
+		if idx > 0 {
+			result[strings.TrimSpace(h[:idx])] = strings.TrimSpace(h[idx+1:])
+		}
+	}
+	return result
 }
 
 // ensureOHTTPKey 确保 OHTTP 密钥存在，返回公钥

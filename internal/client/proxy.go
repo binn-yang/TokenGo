@@ -17,7 +17,6 @@ import (
 	"github.com/binn/tokengo/internal/bootstrap"
 	"github.com/binn/tokengo/internal/config"
 	"github.com/binn/tokengo/internal/dht"
-	"github.com/binn/tokengo/pkg/openai"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
@@ -138,12 +137,8 @@ func (p *LocalProxy) Start() error {
 
 	mux := http.NewServeMux()
 
-	// OpenAI 兼容 API
-	mux.HandleFunc("/v1/chat/completions", p.handleChatCompletions)
-	mux.HandleFunc("/v1/models", p.handleModels)
-
-	// 通用转发
-	mux.HandleFunc("/", p.handleForward)
+	// 统一路由：协议无关的透明转发
+	mux.HandleFunc("/", p.handleRequest)
 
 	p.server = &http.Server{
 		Addr:         p.cfg.Listen,
@@ -280,53 +275,69 @@ func extractRelayAddrFromPeerInfo(info peer.AddrInfo) string {
 	return ""
 }
 
-// handleChatCompletions 处理聊天补全请求
-func (p *LocalProxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
+// handleRequest 统一请求处理 (协议无关)
+func (p *LocalProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// 读取请求体
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.writeError(w, "读取请求失败", http.StatusBadRequest)
-		return
-	}
-	defer r.Body.Close()
-
-	// 验证请求格式
-	var req openai.ChatCompletionRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, "无效的请求格式", http.StatusBadRequest)
-		return
+	var body []byte
+	var err error
+	if r.Body != nil {
+		body, err = io.ReadAll(r.Body)
+		if err != nil {
+			p.writeError(w, "读取请求失败", http.StatusBadRequest)
+			return
+		}
+		defer r.Body.Close()
 	}
 
-	// 检查是否请求流式响应
-	if req.Stream {
+	// 检测是否为流式请求
+	if detectStreaming(body, r) {
 		p.handleStreamingRequest(w, r, body)
 		return
 	}
 
-	// 转发请求
-	headers := map[string]string{
-		"Content-Type": "application/json",
+	// 非流式: 收集 headers 并转发
+	headers := make(map[string]string)
+	for key := range r.Header {
+		headers[key] = r.Header.Get(key)
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), p.cfg.Timeout)
+	ctx, cancel := context.WithTimeout(r.Context(), p.getTimeout())
 	defer cancel()
 
-	respBody, statusCode, err := p.client.SendRequestRaw(ctx, http.MethodPost, "/v1/chat/completions", body, headers)
+	respBody, statusCode, err := p.client.SendRequestRaw(ctx, r.Method, r.URL.Path, body, headers)
 	if err != nil {
 		log.Printf("请求失败: %v", err)
-		p.writeError(w, "AI 服务请求失败", http.StatusBadGateway)
+		p.writeError(w, "请求转发失败", http.StatusBadGateway)
 		return
 	}
 
-	// 返回响应
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	w.Write(respBody)
+}
+
+// detectStreaming 协议无关的流式请求检测
+func detectStreaming(body []byte, r *http.Request) bool {
+	// 1. body 中包含 "stream":true 或 "stream": true (覆盖 OpenAI、Claude)
+	if len(body) > 0 {
+		// 简单字节匹配，避免解析整个 JSON
+		if bytes.Contains(body, []byte(`"stream":true`)) ||
+			bytes.Contains(body, []byte(`"stream": true`)) {
+			return true
+		}
+	}
+
+	// 2. URL 路径包含 "stream" (覆盖 Gemini 的 streamGenerateContent)
+	if strings.Contains(r.URL.Path, "stream") {
+		return true
+	}
+
+	// 3. Accept header 包含 text/event-stream (显式声明)
+	if strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+		return true
+	}
+
+	return false
 }
 
 // handleStreamingRequest 处理流式请求
@@ -337,13 +348,19 @@ func (p *LocalProxy) handleStreamingRequest(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// 构建 HTTP 请求转发到 AI 后端
-	httpReq, err := http.NewRequestWithContext(r.Context(), "POST", "http://ai-backend/v1/chat/completions", bytes.NewReader(body))
+	// 构建 HTTP 请求，使用原始路径透明转发
+	httpReq, err := http.NewRequestWithContext(r.Context(), r.Method, "http://ai-backend"+r.URL.Path, bytes.NewReader(body))
 	if err != nil {
 		p.writeError(w, "创建请求失败", http.StatusInternalServerError)
 		return
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
+
+	// 复制原始请求的 headers
+	for key, values := range r.Header {
+		for _, value := range values {
+			httpReq.Header.Add(key, value)
+		}
+	}
 	httpReq.ContentLength = int64(len(body))
 
 	// 发送流式请求
@@ -380,70 +397,21 @@ func (p *LocalProxy) handleStreamingRequest(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-// handleModels 处理模型列表请求
-func (p *LocalProxy) handleModels(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
+// getTimeout 获取请求超时时间
+func (p *LocalProxy) getTimeout() time.Duration {
+	if p.cfg.Timeout > 0 {
+		return p.cfg.Timeout
 	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), p.cfg.Timeout)
-	defer cancel()
-
-	respBody, statusCode, err := p.client.SendRequestRaw(ctx, http.MethodGet, "/v1/models", nil, nil)
-	if err != nil {
-		log.Printf("请求失败: %v", err)
-		p.writeError(w, "获取模型列表失败", http.StatusBadGateway)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	w.Write(respBody)
+	return 30 * time.Second
 }
 
-// handleForward 通用请求转发
-func (p *LocalProxy) handleForward(w http.ResponseWriter, r *http.Request) {
-	// 读取请求体
-	var body []byte
-	var err error
-	if r.Body != nil {
-		body, err = io.ReadAll(r.Body)
-		if err != nil {
-			p.writeError(w, "读取请求失败", http.StatusBadRequest)
-			return
-		}
-		defer r.Body.Close()
-	}
-
-	// 收集 headers
-	headers := make(map[string]string)
-	for key := range r.Header {
-		headers[key] = r.Header.Get(key)
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), p.cfg.Timeout)
-	defer cancel()
-
-	respBody, statusCode, err := p.client.SendRequestRaw(ctx, r.Method, r.URL.Path, body, headers)
-	if err != nil {
-		log.Printf("请求失败: %v", err)
-		p.writeError(w, "请求转发失败", http.StatusBadGateway)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	w.Write(respBody)
-}
-
-// writeError 写入错误响应
+// writeError 写入通用错误响应
 func (p *LocalProxy) writeError(w http.ResponseWriter, message string, status int) {
-	resp := openai.ErrorResponse{
-		Error: openai.ErrorDetail{
-			Message: message,
-			Type:    "api_error",
-			Code:    fmt.Sprintf("%d", status),
+	resp := map[string]interface{}{
+		"error": map[string]interface{}{
+			"message": message,
+			"type":    "api_error",
+			"code":    fmt.Sprintf("%d", status),
 		},
 	}
 
