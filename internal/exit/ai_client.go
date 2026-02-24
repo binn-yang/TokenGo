@@ -107,17 +107,19 @@ func IsSSEResponse(resp *http.Response) bool {
 	return len(ct) >= 17 && ct[:17] == "text/event-stream"
 }
 
+// hopByHopHeaders 包级变量，避免每次调用时创建新 map
+var hopByHopHeaders = map[string]bool{
+	"Connection":          true,
+	"Keep-Alive":          true,
+	"Proxy-Authenticate":  true,
+	"Proxy-Authorization": true,
+	"Te":                  true,
+	"Trailers":            true,
+	"Transfer-Encoding":   true,
+	"Upgrade":             true,
+}
+
 // isHopByHopHeader 检查是否是 hop-by-hop header
 func isHopByHopHeader(header string) bool {
-	hopByHopHeaders := map[string]bool{
-		"Connection":          true,
-		"Keep-Alive":          true,
-		"Proxy-Authenticate":  true,
-		"Proxy-Authorization": true,
-		"Te":                  true,
-		"Trailers":            true,
-		"Transfer-Encoding":   true,
-		"Upgrade":             true,
-	}
 	return hopByHopHeaders[header]
 }

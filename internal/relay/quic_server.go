@@ -245,7 +245,13 @@ func (s *QUICServer) handleStream(stream quic.Stream) {
 		s.handleStreamForwardRequest(stream, msg)
 	case protocol.MessageTypeQueryExitKeys:
 		entries := s.registry.ListExitKeys()
-		resp := protocol.NewExitKeysResponseMessage(entries)
+		resp, err := protocol.NewExitKeysResponseMessage(entries)
+		if err != nil {
+			log.Printf("序列化 Exit 公钥列表失败: %v", err)
+			errMsg := protocol.NewErrorMessage("failed to serialize exit keys")
+			stream.Write(errMsg.Encode())
+			return
+		}
 		stream.Write(resp.Encode())
 	default:
 		log.Printf("无效的消息类型: %d", msg.Type)

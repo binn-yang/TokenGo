@@ -157,75 +157,76 @@ func (ctx *ClientContext) DecapsulateResponse(data []byte) (*http.Response, erro
 
 // StreamEncryptor 流式加密器 (Exit 侧使用)
 type StreamEncryptor struct {
-	streamKey []byte // 16 bytes AES-128 key
+	aead cipher.AEAD
 }
 
 // NewStreamEncryptor 从 HPKE 会话派生流加密密钥
 func (ctx *ServerContext) NewStreamEncryptor() (*StreamEncryptor, error) {
 	streamKey := ctx.opener.Export([]byte("ohttp-stream"), 16)
-	return &StreamEncryptor{streamKey: streamKey}, nil
+	aead, err := newAEAD(streamKey)
+	if err != nil {
+		return nil, err
+	}
+	return &StreamEncryptor{aead: aead}, nil
 }
 
 // EncryptChunk 加密单个流式数据块
 // 输出格式: gcmNonce(12) || ciphertext+tag(N)
 func (e *StreamEncryptor) EncryptChunk(data []byte) ([]byte, error) {
-	block, err := aes.NewCipher(e.streamKey)
-	if err != nil {
-		return nil, fmt.Errorf("创建 AES 失败: %w", err)
-	}
-
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("创建 GCM 失败: %w", err)
-	}
-
-	nonce := make([]byte, aead.NonceSize())
+	nonce := make([]byte, e.aead.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, fmt.Errorf("生成 nonce 失败: %w", err)
 	}
 
 	// nonce || Seal(nonce, data, nil)
-	ct := aead.Seal(nonce, nonce, data, nil)
+	ct := e.aead.Seal(nonce, nonce, data, nil)
 	return ct, nil
 }
 
 // StreamDecryptor 流式解密器 (Client 侧使用)
 type StreamDecryptor struct {
-	streamKey []byte
+	aead cipher.AEAD
 }
 
 // NewStreamDecryptor 从 HPKE 会话派生流解密密钥
 func (ctx *ClientContext) NewStreamDecryptor() (*StreamDecryptor, error) {
 	streamKey := ctx.sealer.Export([]byte("ohttp-stream"), 16)
-	return &StreamDecryptor{streamKey: streamKey}, nil
+	aead, err := newAEAD(streamKey)
+	if err != nil {
+		return nil, err
+	}
+	return &StreamDecryptor{aead: aead}, nil
 }
 
 // DecryptChunk 解密单个流式数据块
 func (d *StreamDecryptor) DecryptChunk(data []byte) ([]byte, error) {
-	block, err := aes.NewCipher(d.streamKey)
-	if err != nil {
-		return nil, fmt.Errorf("创建 AES 失败: %w", err)
-	}
-
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("创建 GCM 失败: %w", err)
-	}
-
-	nonceSize := aead.NonceSize()
-	if len(data) < nonceSize+aead.Overhead() {
+	nonceSize := d.aead.NonceSize()
+	if len(data) < nonceSize+d.aead.Overhead() {
 		return nil, fmt.Errorf("密文太短")
 	}
 
 	nonce := data[:nonceSize]
 	ct := data[nonceSize:]
 
-	plaintext, err := aead.Open(nil, nonce, ct, nil)
+	plaintext, err := d.aead.Open(nil, nonce, ct, nil)
 	if err != nil {
 		return nil, fmt.Errorf("解密失败: %w", err)
 	}
 
 	return plaintext, nil
+}
+
+// newAEAD 创建 AES-128-GCM AEAD 实例
+func newAEAD(key []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("创建 AES 失败: %w", err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("创建 GCM 失败: %w", err)
+	}
+	return aead, nil
 }
 
 // OHTTPServer 服务端 OHTTP 处理器

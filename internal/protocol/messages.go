@@ -206,10 +206,13 @@ func NewQueryExitKeysMessage() *Message {
 }
 
 // NewExitKeysResponseMessage 创建 Exit 公钥列表响应消息 (Relay → Client)
-func NewExitKeysResponseMessage(entries []ExitKeyEntry) *Message {
-	data, _ := json.Marshal(entries)
+func NewExitKeysResponseMessage(entries []ExitKeyEntry) (*Message, error) {
+	data, err := json.Marshal(entries)
+	if err != nil {
+		return nil, fmt.Errorf("marshal exit keys: %w", err)
+	}
 	return &Message{
 		Type:    MessageTypeExitKeysResponse,
 		Payload: data,
-	}
+	}, nil
 }

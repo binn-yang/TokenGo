@@ -36,42 +36,16 @@ func NewOHTTPHandler(keyID uint8, privateKey, publicKey []byte, aiClient *AIClie
 	}, nil
 }
 
-// HandleOHTTP 处理 OHTTP 请求
-func (h *OHTTPHandler) HandleOHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// 检查 Content-Type
-	contentType := r.Header.Get("Content-Type")
-	if contentType != "message/ohttp-req" {
-		http.Error(w, "Invalid content type", http.StatusBadRequest)
-		return
-	}
-
-	// 读取 OHTTP 请求
-	ohttpReq, err := io.ReadAll(r.Body)
+// decryptAndForward 核心逻辑: 解密 OHTTP → 转发到 AI → 加密响应
+func (h *OHTTPHandler) decryptAndForward(ohttpReqData []byte) ([]byte, error) {
+	innerReq, ctx, err := h.ohttpServer.DecapsulateRequest(ohttpReqData)
 	if err != nil {
-		log.Printf("读取请求体失败: %v", err)
-		http.Error(w, "Failed to read request", http.StatusBadRequest)
-		return
-	}
-	defer r.Body.Close()
-
-	// 解密 OHTTP 请求
-	innerReq, ctx, err := h.ohttpServer.DecapsulateRequest(ohttpReq)
-	if err != nil {
-		log.Printf("解密请求失败: %v", err)
-		http.Error(w, "Failed to decrypt request", http.StatusBadRequest)
-		return
+		return nil, fmt.Errorf("解密请求失败: %w", err)
 	}
 
-	// 转发到 AI 后端
 	innerResp, err := h.aiClient.Forward(innerReq)
 	if err != nil {
 		log.Printf("转发请求失败: %v", err)
-		// 创建错误响应
 		innerResp = &http.Response{
 			StatusCode: http.StatusBadGateway,
 			Status:     "502 Bad Gateway",
@@ -85,21 +59,131 @@ func (h *OHTTPHandler) HandleOHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer innerResp.Body.Close()
 
-	// 加密响应
 	ohttpResp, err := ctx.EncapsulateResponse(innerResp)
 	if err != nil {
-		log.Printf("加密响应失败: %v", err)
-		http.Error(w, "Failed to encrypt response", http.StatusInternalServerError)
+		return nil, fmt.Errorf("加密响应失败: %w", err)
+	}
+
+	return ohttpResp, nil
+}
+
+// streamContext 流式处理上下文，由 prepareStream 创建，writeStreamChunks 消费
+type streamContext struct {
+	encryptor *crypto.StreamEncryptor
+	resp      *http.Response
+}
+
+// prepareStream 解密请求并建立流式转发连接
+func (h *OHTTPHandler) prepareStream(ohttpReqData []byte) (*streamContext, error) {
+	innerReq, ctx, err := h.ohttpServer.DecapsulateRequest(ohttpReqData)
+	if err != nil {
+		return nil, fmt.Errorf("解密请求失败: %w", err)
+	}
+
+	encryptor, err := ctx.NewStreamEncryptor()
+	if err != nil {
+		return nil, fmt.Errorf("创建流加密器失败: %w", err)
+	}
+
+	innerResp, err := h.aiClient.ForwardStream(innerReq)
+	if err != nil {
+		return nil, fmt.Errorf("转发请求失败: %w", err)
+	}
+
+	if innerResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(innerResp.Body)
+		innerResp.Body.Close()
+		return nil, fmt.Errorf("AI 后端返回错误: %d - %s", innerResp.StatusCode, string(body))
+	}
+
+	return &streamContext{encryptor: encryptor, resp: innerResp}, nil
+}
+
+// writeStreamChunks 从 AI 响应读取 SSE 事件，加密并写入 StreamChunk/StreamEnd
+func (h *OHTTPHandler) writeStreamChunks(sc *streamContext, writer io.Writer) error {
+	defer sc.resp.Body.Close()
+
+	scanner := bufio.NewScanner(sc.resp.Body)
+	var eventBuf strings.Builder
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		eventBuf.WriteString(line)
+		eventBuf.WriteString("\n")
+
+		// SSE 事件以空行分隔
+		if line == "" && eventBuf.Len() > 1 {
+			event := eventBuf.String()
+			eventBuf.Reset()
+
+			encrypted, err := sc.encryptor.EncryptChunk([]byte(event))
+			if err != nil {
+				log.Printf("加密流式块失败: %v", err)
+				break
+			}
+
+			msg := protocol.NewStreamChunkMessage(encrypted)
+			if _, err := writer.Write(msg.Encode()); err != nil {
+				log.Printf("写入流式块失败: %v", err)
+				break
+			}
+		}
+	}
+
+	endMsg := protocol.NewStreamEndMessage()
+	if _, err := writer.Write(endMsg.Encode()); err != nil {
+		return fmt.Errorf("写入流式结束标记失败: %w", err)
+	}
+
+	return nil
+}
+
+// flushWriter 自动 flush 的 io.Writer 包装器 (HTTP 流式响应使用)
+type flushWriter struct {
+	w io.Writer
+	f http.Flusher
+}
+
+func (fw *flushWriter) Write(p []byte) (int, error) {
+	n, err := fw.w.Write(p)
+	fw.f.Flush()
+	return n, err
+}
+
+// HandleOHTTP 处理 OHTTP 请求 (HTTP 模式)
+func (h *OHTTPHandler) HandleOHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// 返回 OHTTP 响应
+	contentType := r.Header.Get("Content-Type")
+	if contentType != "message/ohttp-req" {
+		http.Error(w, "Invalid content type", http.StatusBadRequest)
+		return
+	}
+
+	ohttpReq, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("读取请求体失败: %v", err)
+		http.Error(w, "Failed to read request", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	ohttpResp, err := h.decryptAndForward(ohttpReq)
+	if err != nil {
+		log.Printf("%v", err)
+		http.Error(w, "Failed to process request", http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "message/ohttp-res")
 	w.WriteHeader(http.StatusOK)
 	w.Write(ohttpResp)
 }
 
-// HandleOHTTPStream 处理流式 OHTTP 请求
+// HandleOHTTPStream 处理流式 OHTTP 请求 (HTTP 模式)
 func (h *OHTTPHandler) HandleOHTTPStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -112,7 +196,6 @@ func (h *OHTTPHandler) HandleOHTTPStream(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// 读取 OHTTP 请求
 	ohttpReq, err := io.ReadAll(r.Body)
 	if err != nil {
 		log.Printf("读取请求体失败: %v", err)
@@ -121,42 +204,16 @@ func (h *OHTTPHandler) HandleOHTTPStream(w http.ResponseWriter, r *http.Request)
 	}
 	defer r.Body.Close()
 
-	// 解密 OHTTP 请求
-	innerReq, ctx, err := h.ohttpServer.DecapsulateRequest(ohttpReq)
+	sc, err := h.prepareStream(ohttpReq)
 	if err != nil {
-		log.Printf("解密请求失败: %v", err)
-		http.Error(w, "Failed to decrypt request", http.StatusBadRequest)
+		log.Printf("%v", err)
+		http.Error(w, "Failed to process stream request", http.StatusBadGateway)
 		return
 	}
 
-	// 从 HPKE 上下文派生流加密器
-	encryptor, err := ctx.NewStreamEncryptor()
-	if err != nil {
-		log.Printf("创建流加密器失败: %v", err)
-		http.Error(w, "Failed to create stream encryptor", http.StatusInternalServerError)
-		return
-	}
-
-	// 使用流式客户端转发到 AI 后端
-	innerResp, err := h.aiClient.ForwardStream(innerReq)
-	if err != nil {
-		log.Printf("转发请求失败: %v", err)
-		http.Error(w, "AI backend unavailable", http.StatusBadGateway)
-		return
-	}
-	defer innerResp.Body.Close()
-
-	// 检查 AI 后端是否返回错误
-	if innerResp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(innerResp.Body)
-		log.Printf("AI 后端返回错误: %d - %s", innerResp.StatusCode, string(body))
-		http.Error(w, "AI backend error", innerResp.StatusCode)
-		return
-	}
-
-	// 设置响应头，使用 Flusher 实现分块写入
 	flusher, ok := w.(http.Flusher)
 	if !ok {
+		sc.resp.Body.Close()
 		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
 		return
 	}
@@ -165,143 +222,23 @@ func (h *OHTTPHandler) HandleOHTTPStream(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	// 逐行读取 AI 后端 SSE 响应，累积完整事件后加密发送
-	scanner := bufio.NewScanner(innerResp.Body)
-	var eventBuf strings.Builder
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		eventBuf.WriteString(line)
-		eventBuf.WriteString("\n")
-
-		// SSE 事件以空行分隔
-		if line == "" && eventBuf.Len() > 1 {
-			event := eventBuf.String()
-			eventBuf.Reset()
-
-			// 加密该事件
-			encrypted, err := encryptor.EncryptChunk([]byte(event))
-			if err != nil {
-				log.Printf("加密流式块失败: %v", err)
-				break
-			}
-
-			// 写入 StreamChunk 协议消息
-			msg := protocol.NewStreamChunkMessage(encrypted)
-			if _, err := w.Write(msg.Encode()); err != nil {
-				log.Printf("写入流式块失败: %v", err)
-				break
-			}
-			flusher.Flush()
-		}
+	if err := h.writeStreamChunks(sc, &flushWriter{w: w, f: flusher}); err != nil {
+		log.Printf("流式处理失败: %v", err)
 	}
-
-	// 写入 StreamEnd 标记
-	endMsg := protocol.NewStreamEndMessage()
-	w.Write(endMsg.Encode())
-	flusher.Flush()
 }
 
-// ProcessRequest 处理 OHTTP 请求 (隧道模式，不经过 HTTP 层)
+// ProcessRequest 处理 OHTTP 请求 (隧道模式)
 func (h *OHTTPHandler) ProcessRequest(ohttpReq []byte) ([]byte, error) {
-	// 1. 解密 OHTTP 请求
-	innerReq, ctx, err := h.ohttpServer.DecapsulateRequest(ohttpReq)
-	if err != nil {
-		return nil, fmt.Errorf("解密请求失败: %w", err)
-	}
-
-	// 2. 转发到 AI 后端
-	innerResp, err := h.aiClient.Forward(innerReq)
-	if err != nil {
-		log.Printf("转发请求失败: %v", err)
-		// 创建错误响应
-		innerResp = &http.Response{
-			StatusCode: http.StatusBadGateway,
-			Status:     "502 Bad Gateway",
-			Proto:      "HTTP/1.1",
-			ProtoMajor: 1,
-			ProtoMinor: 1,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(bytes.NewReader([]byte(`{"error":"AI backend unavailable"}`))),
-		}
-		innerResp.Header.Set("Content-Type", "application/json")
-	}
-	defer innerResp.Body.Close()
-
-	// 3. 加密响应
-	ohttpResp, err := ctx.EncapsulateResponse(innerResp)
-	if err != nil {
-		return nil, fmt.Errorf("加密响应失败: %w", err)
-	}
-
-	// 4. 返回加密后的响应字节
-	return ohttpResp, nil
+	return h.decryptAndForward(ohttpReq)
 }
 
 // ProcessStreamRequest 处理流式 OHTTP 请求 (隧道模式)
 func (h *OHTTPHandler) ProcessStreamRequest(ohttpReq []byte, writer io.Writer) error {
-	// 1. 解密 OHTTP 请求
-	innerReq, ctx, err := h.ohttpServer.DecapsulateRequest(ohttpReq)
+	sc, err := h.prepareStream(ohttpReq)
 	if err != nil {
-		return fmt.Errorf("解密请求失败: %w", err)
+		return err
 	}
-
-	// 2. 创建流加密器
-	encryptor, err := ctx.NewStreamEncryptor()
-	if err != nil {
-		return fmt.Errorf("创建流加密器失败: %w", err)
-	}
-
-	// 3. 使用流式客户端转发到 AI 后端
-	innerResp, err := h.aiClient.ForwardStream(innerReq)
-	if err != nil {
-		return fmt.Errorf("转发请求失败: %w", err)
-	}
-	defer innerResp.Body.Close()
-
-	// 检查 AI 后端是否返回错误
-	if innerResp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(innerResp.Body)
-		return fmt.Errorf("AI 后端返回错误: %d - %s", innerResp.StatusCode, string(body))
-	}
-
-	// 4. 逐行读取 AI 后端 SSE 响应，累积完整事件后加密发送
-	scanner := bufio.NewScanner(innerResp.Body)
-	var eventBuf strings.Builder
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		eventBuf.WriteString(line)
-		eventBuf.WriteString("\n")
-
-		// SSE 事件以空行分隔
-		if line == "" && eventBuf.Len() > 1 {
-			event := eventBuf.String()
-			eventBuf.Reset()
-
-			// 加密该事件
-			encrypted, err := encryptor.EncryptChunk([]byte(event))
-			if err != nil {
-				log.Printf("加密流式块失败: %v", err)
-				break
-			}
-
-			// 写入 StreamChunk 协议消息
-			msg := protocol.NewStreamChunkMessage(encrypted)
-			if _, err := writer.Write(msg.Encode()); err != nil {
-				log.Printf("写入流式块失败: %v", err)
-				break
-			}
-		}
-	}
-
-	// 5. 写入 StreamEnd 标记
-	endMsg := protocol.NewStreamEndMessage()
-	if _, err := writer.Write(endMsg.Encode()); err != nil {
-		return fmt.Errorf("写入流式结束标记失败: %w", err)
-	}
-
-	return nil
+	return h.writeStreamChunks(sc, writer)
 }
 
 // HandleKeys 返回 OHTTP 公钥配置

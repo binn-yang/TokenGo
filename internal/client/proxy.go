@@ -259,11 +259,12 @@ func (p *LocalProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 // detectStreaming 协议无关的流式请求检测
 func detectStreaming(body []byte, r *http.Request) bool {
-	// 1. body 中包含 "stream":true 或 "stream": true (覆盖 OpenAI、Claude)
+	// 1. JSON body 中精确匹配 "stream" 字段
 	if len(body) > 0 {
-		// 简单字节匹配，避免解析整个 JSON
-		if bytes.Contains(body, []byte(`"stream":true`)) ||
-			bytes.Contains(body, []byte(`"stream": true`)) {
+		var partial struct {
+			Stream *bool `json:"stream"`
+		}
+		if json.Unmarshal(body, &partial) == nil && partial.Stream != nil && *partial.Stream {
 			return true
 		}
 	}
