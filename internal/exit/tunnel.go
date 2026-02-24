@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/binn/tokengo/internal/dht"
+	"github.com/binn/tokengo/internal/netutil"
 	"github.com/binn/tokengo/internal/protocol"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/quic-go/quic-go"
@@ -30,6 +30,8 @@ type TunnelClient struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	activeRelayAddr string
+	ready           chan struct{}
+	readyOnce       sync.Once
 }
 
 // NewTunnelClient 创建反向隧道客户端（DHT 发现模式）
@@ -48,6 +50,7 @@ func NewTunnelClient(discovery *dht.Discovery, pubKeyHash string, keyConfig []by
 		ohttpHandler: ohttpHandler,
 		ctx:          ctx,
 		cancel:       cancel,
+		ready:        make(chan struct{}),
 	}
 }
 
@@ -67,6 +70,7 @@ func NewTunnelClientStatic(relayAddr string, pubKeyHash string, keyConfig []byte
 		ohttpHandler:    ohttpHandler,
 		ctx:             ctx,
 		cancel:          cancel,
+		ready:           make(chan struct{}),
 	}
 }
 
@@ -111,6 +115,7 @@ func (t *TunnelClient) Start(ctx context.Context) error {
 		}
 
 		log.Printf("已注册到 Relay %s (pubKeyHash=%s)", addr, t.pubKeyHash)
+		t.readyOnce.Do(func() { close(t.ready) })
 		break
 	}
 
@@ -169,7 +174,7 @@ func (t *TunnelClient) selectBestRelay(ctx context.Context, relays []peer.AddrIn
 	var bestRTT time.Duration
 
 	for _, relay := range relays {
-		addr := extractRelayAddrFromPeerInfo(relay)
+		addr := netutil.ExtractQUICAddress(relay.Addrs)
 		if addr == "" {
 			continue
 		}
@@ -191,40 +196,6 @@ func (t *TunnelClient) selectBestRelay(ctx context.Context, relays []peer.AddrIn
 		return "", fmt.Errorf("所有 Relay 节点均不可达")
 	}
 	return bestAddr, nil
-}
-
-// extractRelayAddrFromPeerInfo 从 peer.AddrInfo 提取 host:port
-// 优先返回 UDP 地址（QUIC 服务运行在 UDP 上），TCP 地址仅作为回退
-func extractRelayAddrFromPeerInfo(info peer.AddrInfo) string {
-	var fallbackAddr string
-
-	for _, addr := range info.Addrs {
-		addrStr := addr.String()
-		parts := strings.Split(addrStr, "/")
-		var ip, port string
-		var isUDP bool
-		for i := 0; i < len(parts)-1; i++ {
-			if parts[i] == "ip4" || parts[i] == "ip6" {
-				ip = parts[i+1]
-			}
-			if parts[i] == "udp" {
-				port = parts[i+1]
-				isUDP = true
-			} else if parts[i] == "tcp" {
-				port = parts[i+1]
-			}
-		}
-		if ip != "" && port != "" {
-			result := fmt.Sprintf("%s:%s", ip, port)
-			if isUDP {
-				return result // UDP 优先，直接返回
-			}
-			if fallbackAddr == "" {
-				fallbackAddr = result
-			}
-		}
-	}
-	return fallbackAddr
 }
 
 // probeRelay 探测 Relay 的 RTT (QUIC 握手时间)
@@ -502,6 +473,11 @@ func (t *TunnelClient) Stop() error {
 		return t.conn.CloseWithError(0, "exit shutting down")
 	}
 	return nil
+}
+
+// Ready 返回一个在首次注册成功后关闭的 channel
+func (t *TunnelClient) Ready() <-chan struct{} {
+	return t.ready
 }
 
 // nextBackoff 计算下一次退避时间 (指数退避，上限 maxBackoff)

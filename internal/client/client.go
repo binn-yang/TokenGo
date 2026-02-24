@@ -9,15 +9,14 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings"
 	"sync"
 
 	"github.com/binn/tokengo/internal/crypto"
 	"github.com/binn/tokengo/internal/dht"
 	"github.com/binn/tokengo/internal/loadbalancer"
+	"github.com/binn/tokengo/internal/netutil"
 	"github.com/binn/tokengo/internal/protocol"
 	"github.com/libp2p/go-libp2p/core/peer"
-	ma "github.com/multiformats/go-multiaddr"
 	"github.com/quic-go/quic-go"
 )
 
@@ -108,7 +107,7 @@ func (c *Client) connectWithDiscovery(ctx context.Context) error {
 	}
 
 	// 提取地址
-	relayAddr := extractRelayAddress(selected.Addrs)
+	relayAddr := netutil.ExtractQUICAddress(selected.Addrs)
 	if relayAddr == "" {
 		c.selector.ReportFailure(selected.ID)
 		return fmt.Errorf("无法提取 Relay 地址")
@@ -152,40 +151,6 @@ func (c *Client) connectToAddr(ctx context.Context, addr string, peerID peer.ID)
 	c.relayAddr = addr
 	c.currentRelayID = peerID
 	return nil
-}
-
-// extractRelayAddress 从 multiaddr 提取 IP:Port
-// 优先返回 UDP 地址（QUIC 服务运行在 UDP 上），TCP 地址仅作为回退
-func extractRelayAddress(addrs []ma.Multiaddr) string {
-	var fallbackAddr string
-
-	for _, addr := range addrs {
-		addrStr := addr.String()
-		parts := strings.Split(addrStr, "/")
-		var ip, port string
-		var isUDP bool
-		for i := 0; i < len(parts)-1; i++ {
-			if parts[i] == "ip4" || parts[i] == "ip6" {
-				ip = parts[i+1]
-			}
-			if parts[i] == "udp" {
-				port = parts[i+1]
-				isUDP = true
-			} else if parts[i] == "tcp" {
-				port = parts[i+1]
-			}
-		}
-		if ip != "" && port != "" {
-			result := fmt.Sprintf("%s:%s", ip, port)
-			if isUDP {
-				return result // UDP 优先，直接返回
-			}
-			if fallbackAddr == "" {
-				fallbackAddr = result
-			}
-		}
-	}
-	return fallbackAddr
 }
 
 // Connect 公开的连接方法

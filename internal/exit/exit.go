@@ -186,6 +186,11 @@ func (e *ExitNode) handleShutdown() {
 	}
 }
 
+// Ready 返回一个在 Exit 首次注册到 Relay 后关闭的 channel
+func (e *ExitNode) Ready() <-chan struct{} {
+	return e.tunnel.Ready()
+}
+
 // Stop 停止出口节点
 func (e *ExitNode) Stop() error {
 	// 停止 DHT 服务
