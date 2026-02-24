@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"time"
@@ -49,8 +50,9 @@ type TLSConfig struct {
 
 // AIBackend AI 后端配置
 type AIBackend struct {
-	URL    string `yaml:"url"`
-	APIKey string `yaml:"api_key"`
+	URL     string            `yaml:"url"`
+	APIKey  string            `yaml:"api_key"`
+	Headers map[string]string `yaml:"headers,omitempty"`
 }
 
 // DHTConfig DHT 配置
@@ -73,8 +75,13 @@ type FallbackConfig struct {
 // FallbackExit 回退 Exit 节点配置
 type FallbackExit struct {
 	Address   string `yaml:"address"`    // Exit 地址 (host:port)
-	PublicKey []byte `yaml:"public_key"` // OHTTP 公钥
+	PublicKey string `yaml:"public_key"` // OHTTP 公钥 (base64 编码)
 	KeyID     uint8  `yaml:"key_id"`     // OHTTP KeyID
+}
+
+// PublicKeyBytes 解码 base64 编码的公钥
+func (f *FallbackExit) PublicKeyBytes() ([]byte, error) {
+	return base64.StdEncoding.DecodeString(f.PublicKey)
 }
 
 // BootstrapConfig Bootstrap 节点配置

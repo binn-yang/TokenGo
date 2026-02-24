@@ -55,7 +55,7 @@ func New(cfg *config.ExitConfig) (*ExitNode, error) {
 	}
 
 	// 创建 AI 客户端
-	aiClient := NewAIClient(cfg.AIBackend.URL, cfg.AIBackend.APIKey)
+	aiClient := NewAIClient(cfg.AIBackend.URL, cfg.AIBackend.APIKey, cfg.AIBackend.Headers)
 
 	// 创建 OHTTP 处理器
 	ohttpHandler, err := NewOHTTPHandler(keyID, privateKey, publicKey, aiClient)

@@ -1,0 +1,10 @@
+listen: "127.0.0.1:8080"
+insecure_skip_verify: true
+
+fallback:
+  relay_addrs:
+    - "43.156.60.67:4433"
+  exits:
+    - address: "43.156.60.67:8443"
+      public_key: "R671Dd2FaChcefha2jINUot+vyLTZD17SrAK5x+HRW4="
+      key_id: 127
