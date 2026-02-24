@@ -1,6 +1,6 @@
 module github.com/binn/tokengo
 
-go 1.21
+go 1.22
 
 require (
 	github.com/cloudflare/circl v1.3.7

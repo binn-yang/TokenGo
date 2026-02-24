@@ -3,9 +3,8 @@ package loadbalancer
 import (
 	"context"
 	"errors"
-	"math/rand"
+	"math/rand/v2"
 	"sync"
-	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 )
@@ -32,12 +31,26 @@ type Selector interface {
 	ReportFailure(peerID peer.ID)
 }
 
+// filterHealthy 过滤健康节点 (失败次数 < threshold 的节点)
+// 如果全部不健康，返回原列表并清空 failures
+func filterHealthy(candidates []peer.AddrInfo, failures map[peer.ID]int, threshold int) ([]peer.AddrInfo, bool) {
+	var healthy []peer.AddrInfo
+	for _, c := range candidates {
+		if failures[c.ID] < threshold {
+			healthy = append(healthy, c)
+		}
+	}
+	if len(healthy) == 0 {
+		return candidates, true // reset needed
+	}
+	return healthy, false
+}
+
 // WeightedSelector 加权选择器
 type WeightedSelector struct {
 	weights  map[peer.ID]float64
 	failures map[peer.ID]int
 	mu       sync.RWMutex
-	rand     *rand.Rand
 }
 
 // NewWeightedSelector 创建加权选择器
@@ -45,7 +58,6 @@ func NewWeightedSelector() *WeightedSelector {
 	return &WeightedSelector{
 		weights:  make(map[peer.ID]float64),
 		failures: make(map[peer.ID]int),
-		rand:     rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -70,12 +82,12 @@ func (s *WeightedSelector) Select(ctx context.Context, candidates []peer.AddrInf
 
 	if totalWeight <= 0 {
 		// 所有节点权重为 0，随机选择
-		idx := s.rand.Intn(len(candidates))
+		idx := rand.IntN(len(candidates))
 		return &candidates[idx], nil
 	}
 
 	// 加权随机选择
-	r := s.rand.Float64() * totalWeight
+	r := rand.Float64() * totalWeight
 	var cumulative float64
 
 	for i, w := range weights {
@@ -177,18 +189,9 @@ func (s *RoundRobinSelector) Select(ctx context.Context, candidates []peer.AddrI
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 过滤不健康的节点
-	var healthy []peer.AddrInfo
-	for _, c := range candidates {
-		if s.failures[c.ID] < 3 {
-			healthy = append(healthy, c)
-		}
-	}
-
-	if len(healthy) == 0 {
-		// 所有节点都不健康，重置并使用原列表
+	healthy, resetNeeded := filterHealthy(candidates, s.failures, 3)
+	if resetNeeded {
 		s.failures = make(map[peer.ID]int)
-		healthy = candidates
 	}
 
 	// 轮询选择
@@ -213,7 +216,6 @@ func (s *RoundRobinSelector) ReportFailure(peerID peer.ID) {
 // RandomSelector 随机选择器
 type RandomSelector struct {
 	failures map[peer.ID]int
-	rand     *rand.Rand
 	mu       sync.Mutex
 }
 
@@ -221,7 +223,6 @@ type RandomSelector struct {
 func NewRandomSelector() *RandomSelector {
 	return &RandomSelector{
 		failures: make(map[peer.ID]int),
-		rand:     rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -234,20 +235,12 @@ func (s *RandomSelector) Select(ctx context.Context, candidates []peer.AddrInfo)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 过滤不健康的节点
-	var healthy []peer.AddrInfo
-	for _, c := range candidates {
-		if s.failures[c.ID] < 3 {
-			healthy = append(healthy, c)
-		}
-	}
-
-	if len(healthy) == 0 {
+	healthy, resetNeeded := filterHealthy(candidates, s.failures, 3)
+	if resetNeeded {
 		s.failures = make(map[peer.ID]int)
-		healthy = candidates
 	}
 
-	idx := s.rand.Intn(len(healthy))
+	idx := rand.IntN(len(healthy))
 	return &healthy[idx], nil
 }
 

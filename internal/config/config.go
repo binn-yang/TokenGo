@@ -34,6 +34,7 @@ type RelayConfig struct {
 // ExitConfig 出口节点配置
 type ExitConfig struct {
 	OHTTPPrivateKeyFile string    `yaml:"ohttp_private_key_file"`
+	OHTTPPublicKeyFile  string    `yaml:"ohttp_public_key_file,omitempty"` // 可选，默认为私钥文件 + ".pub"
 	AIBackend           AIBackend `yaml:"ai_backend"`
 	InsecureSkipVerify  bool      `yaml:"insecure_skip_verify"` // 仅开发环境使用
 	DHT                 DHTConfig `yaml:"dht,omitempty"`

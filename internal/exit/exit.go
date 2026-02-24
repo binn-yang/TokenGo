@@ -55,9 +55,11 @@ func newExitNode(cfg *config.ExitConfig, staticRelay string) (*ExitNode, error) 
 		return nil, fmt.Errorf("解码私钥失败: %w", err)
 	}
 
-	// 从私钥派生公钥 (需要重新生成密钥对获取公钥，或从配置读取)
-	// 为简化，这里假设公钥文件与私钥文件同目录，后缀为 .pub
-	pubKeyPath := cfg.OHTTPPrivateKeyFile + ".pub"
+	// 优先使用显式配置的公钥路径，否则回退到私钥文件 + ".pub"
+	pubKeyPath := cfg.OHTTPPublicKeyFile
+	if pubKeyPath == "" {
+		pubKeyPath = cfg.OHTTPPrivateKeyFile + ".pub"
+	}
 	pubKeyData, err := os.ReadFile(pubKeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("读取公钥文件失败: %w", err)
