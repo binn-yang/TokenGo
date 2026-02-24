@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/binn/tokengo/internal/config"
 	"github.com/binn/tokengo/internal/dht"
@@ -17,7 +18,7 @@ import (
 type RelayNode struct {
 	cfg        *config.RelayConfig
 	quicServer *QUICServer
-	forwarder  *Forwarder
+	registry   *Registry
 	dhtNode    *dht.Node
 	provider   *dht.Provider
 	ctx        context.Context
@@ -38,7 +39,7 @@ func New(cfg *config.RelayConfig) (*RelayNode, error) {
 
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		NextProtos:   []string{"tokengo-relay"}, // ALPN 协议标识
+		NextProtos:   []string{"tokengo-relay", "tokengo-exit"}, // 支持 Client 和 Exit 两种 ALPN
 		MinVersion:   tls.VersionTLS13,
 	}
 
@@ -55,9 +56,8 @@ func New(cfg *config.RelayConfig) (*RelayNode, error) {
 		cancel: cancel,
 	}
 
-	// 盲转发模式：Exit 地址由 Client 指定
-	// Relay 只负责转发，不再发现 Exit 节点
-	node.forwarder = NewForwarder(cfg.InsecureSkipVerify)
+	// 创建 Exit 注册表（替代原有的 Forwarder）
+	node.registry = NewRegistry()
 
 	// 如果启用了 DHT，仅用于注册 Relay 服务供 Client 发现
 	if cfg.DHT.Enabled {
@@ -81,7 +81,7 @@ func New(cfg *config.RelayConfig) (*RelayNode, error) {
 	}
 
 	// 创建 QUIC 服务器
-	node.quicServer = NewQUICServer(cfg.Listen, tlsConfig, node.forwarder)
+	node.quicServer = NewQUICServer(cfg.Listen, tlsConfig, node.registry)
 
 	return node, nil
 }
@@ -90,7 +90,10 @@ func New(cfg *config.RelayConfig) (*RelayNode, error) {
 func (r *RelayNode) Start() error {
 	log.Printf("Relay 节点启动")
 	log.Printf("监听地址: %s", r.cfg.Listen)
-	log.Printf("模式: 盲转发 (Exit 地址由 Client 指定)")
+	log.Printf("模式: 反向隧道 (Exit 主动连接注册)")
+
+	// 启动 Registry 清理任务
+	r.registry.StartCleanup(r.ctx, 60*time.Second)
 
 	// 启动 DHT 节点（仅用于注册 Relay 服务）
 	if r.dhtNode != nil {
@@ -139,4 +142,9 @@ func (r *RelayNode) Stop() error {
 
 	r.cancel()
 	return r.quicServer.Stop()
+}
+
+// Ready 返回就绪信号 channel，当 Relay 节点成功启动后会关闭该 channel
+func (r *RelayNode) Ready() <-chan struct{} {
+	return r.quicServer.Ready()
 }

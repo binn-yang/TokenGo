@@ -35,10 +35,10 @@ type RelayConfig struct {
 
 // ExitConfig 出口节点配置
 type ExitConfig struct {
-	Listen              string    `yaml:"listen"`
+	RelayAddrs          []string  `yaml:"relay_addrs"`           // 要连接的 Relay 地址列表
 	OHTTPPrivateKeyFile string    `yaml:"ohttp_private_key_file"`
 	AIBackend           AIBackend `yaml:"ai_backend"`
-	TLS                 TLSConfig `yaml:"tls"`
+	InsecureSkipVerify  bool      `yaml:"insecure_skip_verify"` // 仅开发环境使用
 	DHT                 DHTConfig `yaml:"dht,omitempty"`
 }
 
@@ -74,7 +74,6 @@ type FallbackConfig struct {
 
 // FallbackExit 回退 Exit 节点配置
 type FallbackExit struct {
-	Address   string `yaml:"address"`    // Exit 地址 (host:port)
 	PublicKey string `yaml:"public_key"` // OHTTP 公钥 (base64 编码)
 	KeyID     uint8  `yaml:"key_id"`     // OHTTP KeyID
 }
@@ -157,9 +156,6 @@ func LoadExitConfig(path string) (*ExitConfig, error) {
 	}
 
 	// 设置默认值
-	if cfg.Listen == "" {
-		cfg.Listen = ":443"
-	}
 	if cfg.AIBackend.URL == "" {
 		cfg.AIBackend.URL = "http://localhost:11434"
 	}

@@ -2,15 +2,12 @@ package exit
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/binn/tokengo/internal/config"
 	"github.com/binn/tokengo/internal/crypto"
@@ -20,7 +17,7 @@ import (
 // ExitNode 出口节点
 type ExitNode struct {
 	cfg          *config.ExitConfig
-	server       *http.Server
+	tunnel       *TunnelClient
 	ohttpHandler *OHTTPHandler
 	dhtNode      *dht.Node
 	provider     *dht.Provider
@@ -63,8 +60,15 @@ func New(cfg *config.ExitConfig) (*ExitNode, error) {
 		return nil, fmt.Errorf("创建 OHTTP 处理器失败: %w", err)
 	}
 
+	// 计算公钥哈希 (用于在 Relay 侧标识此 Exit)
+	pubKeyHash := crypto.PubKeyHash(publicKey)
+
+	// 创建反向隧道客户端
+	tunnel := NewTunnelClient(cfg.RelayAddrs, pubKeyHash, ohttpHandler, cfg.InsecureSkipVerify)
+
 	node := &ExitNode{
 		cfg:          cfg,
+		tunnel:       tunnel,
 		ohttpHandler: ohttpHandler,
 		publicKey:    publicKey,
 		keyID:        keyID,
@@ -115,60 +119,25 @@ func (e *ExitNode) Start() error {
 		}
 	}
 
-	mux := http.NewServeMux()
-
-	// 注册 OHTTP 端点
-	mux.HandleFunc("/ohttp", e.ohttpHandler.HandleOHTTP)
-	mux.HandleFunc("/ohttp-stream", e.ohttpHandler.HandleOHTTPStream)
-	mux.HandleFunc("/ohttp-keys", e.ohttpHandler.HandleKeys)
-
-	// 健康检查端点
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
-	})
-
-	e.server = &http.Server{
-		Addr:         e.cfg.Listen,
-		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 120 * time.Second,
-		IdleTimeout:  120 * time.Second,
-	}
-
-	// 配置 TLS (如果提供了证书)
-	if e.cfg.TLS.CertFile != "" && e.cfg.TLS.KeyFile != "" {
-		cert, err := tls.LoadX509KeyPair(e.cfg.TLS.CertFile, e.cfg.TLS.KeyFile)
-		if err != nil {
-			return fmt.Errorf("加载 TLS 证书失败: %w", err)
-		}
-		e.server.TLSConfig = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
-		}
-	}
-
-	// 启动服务器
-	log.Printf("Exit 节点启动，监听 %s", e.cfg.Listen)
-	log.Printf("AI 后端: %s", e.cfg.AIBackend.URL)
-
-	// 打印公钥，方便客户端配置
+	// 打印公钥信息
 	pubKeyConfig := crypto.EncodeKeyConfig(e.keyID, e.publicKey)
 	pubKeyBase64 := base64.StdEncoding.EncodeToString(pubKeyConfig)
+	pubKeyHash := crypto.PubKeyHash(e.publicKey)
 	log.Printf("")
 	log.Printf("Exit 公钥 (供 Client 使用):")
 	log.Printf("  %s", pubKeyBase64)
+	log.Printf("Exit pubKeyHash: %s", pubKeyHash)
 	log.Printf("")
-	log.Printf("Client 静态模式连接示例:")
-	log.Printf("  tokengo client --relay <RELAY_ADDR> --exit <THIS_EXIT_ADDR> --exit-public-key %s", pubKeyBase64)
+	log.Printf("AI 后端: %s", e.cfg.AIBackend.URL)
+	log.Printf("Relay 地址: %v", e.cfg.RelayAddrs)
+	log.Printf("")
+	log.Printf("正在通过反向隧道连接 Relay...")
 
 	// 优雅关闭
 	go e.handleShutdown()
 
-	if e.server.TLSConfig != nil {
-		return e.server.ListenAndServeTLS("", "")
-	}
-	return e.server.ListenAndServe()
+	// 启动反向隧道 (阻塞)
+	return e.tunnel.Start(context.Background())
 }
 
 // handleShutdown 处理优雅关闭
@@ -179,11 +148,8 @@ func (e *ExitNode) handleShutdown() {
 	<-sigChan
 	log.Println("收到关闭信号，正在关闭...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := e.server.Shutdown(ctx); err != nil {
-		log.Printf("关闭服务器失败: %v", err)
+	if err := e.Stop(); err != nil {
+		log.Printf("关闭失败: %v", err)
 	}
 }
 
@@ -197,11 +163,9 @@ func (e *ExitNode) Stop() error {
 		e.dhtNode.Stop()
 	}
 
-	// 停止 HTTP 服务器
-	if e.server != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		return e.server.Shutdown(ctx)
+	// 停止反向隧道
+	if e.tunnel != nil {
+		return e.tunnel.Stop()
 	}
 	return nil
 }

@@ -2,8 +2,10 @@ package crypto
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"os"
 
@@ -156,4 +158,10 @@ func DecodeKeyConfig(data []byte) (keyID uint8, publicKey []byte, err error) {
 
 	publicKey = data[5 : 5+pubKeyLen]
 	return keyID, publicKey, nil
+}
+
+// PubKeyHash 计算公钥的 SHA-256 哈希（取前16字节，返回32字符 hex 字符串）
+func PubKeyHash(publicKey []byte) string {
+	hash := sha256.Sum256(publicKey)
+	return hex.EncodeToString(hash[:16])
 }
