@@ -2,45 +2,50 @@
 
 ## 项目概述
 
-TokenGo 是一个去中心化 AI API 网关，通过 OHTTP (Oblivious HTTP) 协议实现端到端加密，保护用户隐私。
+TokenGo 是一个去中心化 AI API 网关，通过 OHTTP (Oblivious HTTP, RFC 9458) 协议实现端到端加密，保护用户隐私。
 
 ## 当前状态
 
 - **版本**: 0.1.0
 - **状态**: MVP 可用，Docker 集成测试通过
-- **测试日期**: 2025-12-13
 
 ## 架构设计
 
 ### 核心组件
 
 ```
-┌─────────┐     QUIC      ┌─────────┐    HTTPS     ┌─────────┐    HTTP     ┌─────────┐
-│ Client  │──────────────>│  Relay  │─────────────>│  Exit   │────────────>│ Ollama  │
-│ :8080   │   加密请求     │  :4433  │   转发密文   │  :8443  │   明文请求  │ :11434  │
-└─────────┘               └─────────┘              └─────────┘             └─────────┘
-     │                         │                        │
-     │ 持有 Exit 公钥          │ 无法解密               │ 持有私钥，可解密
-     │ 可加密请求              │ 只知道来源IP           │ 不知道来源IP
+┌─────────┐     QUIC      ┌─────────┐  QUIC 反向隧道  ┌─────────┐    HTTP     ┌──────────┐
+│ Client  │──────────────>│  Relay  │<───────────────│  Exit   │───────────>│ AI 后端  │
+│ :8080   │   加密请求     │  :4433  │   Exit 主动连接  │ (无监听) │   明文请求  │ :11434   │
+└─────────┘               └─────────┘                └─────────┘            └──────────┘
+     │                         │                          │
+     │ 持有 Exit 公钥          │ 无法解密                  │ 持有私钥，可解密
+     │ 从 Relay 查询公钥       │ 只知道来源 IP             │ 不知道来源 IP
 ```
+
+**关键设计**: Exit 无需公网 IP，通过 QUIC 反向隧道主动连接 Relay。Client 从 Relay 查询 Exit 公钥，请求中指定目标 Exit 的 pubKeyHash，Relay 做盲转发。
 
 ### 隐私保护 (盲转发架构)
 
 | 节点 | 知道的信息 | 不知道的信息 |
 |------|-----------|-------------|
-| Relay | Client IP | 请求内容、Exit 地址 (从加密消息中提取转发) |
+| Relay | Client IP、Exit 连接 | 请求内容（OHTTP 加密） |
 | Exit | 请求内容 | Client IP |
-
-**关键设计**: Exit 地址由 Client 在请求消息中指定，Relay 只做盲转发，进一步保护隐私。
 
 ### 端口分配
 
-| 服务 | 端口 | 协议 |
-|------|------|------|
-| Client (本地代理) | 8080 | HTTP |
-| Relay (中继) | 4433 | QUIC |
-| Exit (出口) | 8443 | HTTPS |
-| Ollama (AI 后端) | 11434 | HTTP |
+| 服务 | 端口 | 协议 | 说明 |
+|------|------|------|------|
+| Client (本地代理) | 8080 | HTTP | 监听本地 |
+| Relay (中继) | 4433 | QUIC | 接受 Client 和 Exit 连接 |
+| Exit (出口) | 无监听端口 | QUIC (反向) | 主动连接 Relay |
+| AI 后端 | 11434 | HTTP | 如 Ollama |
+
+### ALPN 协议区分
+
+Relay 通过 TLS ALPN 区分连接类型：
+- `tokengo-exit`: Exit 反向隧道连接
+- `tokengo-relay` (默认): Client 连接
 
 ## 核心模块
 
@@ -50,28 +55,63 @@ OHTTP 加密实现：
 - `ohttp.go` - OHTTP 请求/响应加解密
 - 使用 HPKE (X25519 + HKDF-SHA256 + AES-128-GCM)
 - KeyID 用于匹配客户端公钥和服务端私钥
+- `EncodeKeyConfig` / `LoadPublicKeyConfig` - KeyConfig 编解码 (RFC 9458)
+- `PubKeyHash` - 计算公钥哈希（用于标识 Exit）
 
 ### internal/client
 
 本地 HTTP 代理：
 - 监听本地端口，接收 OpenAI 兼容 API 请求
-- 使用 Exit 公钥加密请求
-- 通过 QUIC 发送到 Relay
+- `NewClient` - 静态模式，需提供 relayAddr、keyID、exitPublicKey
+- `NewClientDynamic` - 动态发现模式，仅需 insecureSkipVerify
+- 通过 DHT 发现 Relay，连接后从 Relay 查询 Exit 公钥
+- 使用 Exit 公钥加密请求，通过 QUIC 发送到 Relay
 
 ### internal/relay
 
 QUIC 中继节点 (盲转发模式)：
-- 接收客户端 QUIC 连接
-- 从请求消息中提取目标 Exit 地址
-- 盲转发加密数据到 Client 指定的 Exit 节点
-- 无法解密任何内容，也不预先配置 Exit 地址
+- 接收 Client/Exit QUIC 连接（通过 ALPN 区分）
+- Exit 注册: 接收 Register 消息，提取 pubKeyHash 和 KeyConfig，存入 Registry
+- Client 请求: 根据消息中的 Target (pubKeyHash) 查找已注册的 Exit 连接并转发
+- 支持 QueryExitKeys: 返回所有已注册 Exit 的 KeyConfig 列表
+- Registry 带心跳超时清理
 
 ### internal/exit
 
-OHTTP 出口节点：
-- 接收加密请求
-- 使用私钥解密
-- 转发明文到 AI 后端
+OHTTP 出口节点 (反向隧道)：
+- 通过 DHT 发现 Relay 节点（或使用静态地址）
+- 主动连接 Relay，使用 ALPN `tokengo-exit`
+- 注册时发送 pubKeyHash + KeyConfig
+- 维持心跳保活（15s 间隔）
+- 接收 Relay 转发的加密请求，解密后转发到 AI 后端
+
+### internal/dht
+
+基于 libp2p Kademlia 的服务发现：
+- `Provider` - 服务注册（Relay/Exit 注册自己到 DHT）
+- `Discovery` - 服务发现（带缓存，2分钟刷新）
+- 命名空间: `/tokengo/relay/v1`, `/tokengo/exit/v1`
+- 使用 CID-based Provider Records
+
+### internal/protocol
+
+自定义二进制消息协议：
+- 格式: `[Type(1)][TargetLen(2)][Target(N)][PayloadLen(4)][Payload(N)]`
+
+| 消息类型 | 值 | 方向 | 说明 |
+|---------|-----|------|------|
+| Request | 0x01 | Client→Relay→Exit | OHTTP 加密请求 |
+| Response | 0x02 | Exit→Relay→Client | OHTTP 加密响应 |
+| StreamRequest | 0x03 | Client→Relay→Exit | 流式请求 |
+| StreamChunk | 0x04 | Exit→Relay→Client | 流式响应块 |
+| StreamEnd | 0x05 | Exit→Relay→Client | 流式结束标记 |
+| Register | 0x10 | Exit→Relay | 注册（含 KeyConfig） |
+| RegisterAck | 0x11 | Relay→Exit | 注册确认 |
+| QueryExitKeys | 0x12 | Client→Relay | 查询 Exit 公钥列表 |
+| ExitKeysResponse | 0x13 | Relay→Client | 返回 Exit 公钥列表 |
+| Heartbeat | 0x20 | Exit→Relay | 心跳 |
+| HeartbeatAck | 0x21 | Relay→Exit | 心跳确认 |
+| Error | 0xFF | 任意 | 错误消息 |
 
 ### pkg/openai
 
@@ -79,25 +119,77 @@ OpenAI API 兼容层：
 - 定义 ChatCompletion 请求/响应结构
 - 支持流式和非流式响应
 
-## 配置文件
+## 配置
 
-### configs/docker/ (Docker 环境)
+### 配置结构体
+
+```go
+ClientConfig {
+    Listen, Timeout, InsecureSkipVerify,
+    DHT (DHTConfig), Bootstrap (BootstrapAPI)
+}
+
+RelayConfig {
+    Listen, TLS (TLSConfig), InsecureSkipVerify,
+    DHT (DHTConfig)
+}
+
+ExitConfig {
+    OHTTPPrivateKeyFile, AIBackend, InsecureSkipVerify,
+    DHT (DHTConfig)  // 必需，用于发现 Relay
+}
+
+DHTConfig {
+    Enabled, BootstrapPeers, ListenAddrs, ExternalAddrs,
+    PrivateKeyFile, Mode, UseIPFSBootstrap
+}
+```
+
+### 配置文件
+
+| 文件 | 用途 |
+|------|------|
+| `configs/client.yaml` | Client 配置（DHT 发现 + Bootstrap API） |
+| `configs/relay-dht.yaml` | Relay 配置（DHT 注册） |
+| `configs/exit-dht.yaml` | Exit 配置（DHT 发现 Relay） |
+| `configs/docker/` | Docker 环境专用配置 |
 
 ```yaml
-# client.yaml
-listen: "0.0.0.0:8080"
-relay: "relay:4433"
-exit_public_key: "<base64 编码的公钥>"
+# configs/client.yaml
+listen: "127.0.0.1:8080"
+timeout: 30s
+insecure_skip_verify: true
+dht:
+  enabled: true
+  use_ipfs_bootstrap: true
+  listen_addrs:
+    - "/ip4/0.0.0.0/tcp/0"
 
-# relay.yaml
+# configs/relay-dht.yaml
 listen: ":4433"
-exit: "exit:8443"
+tls:
+  cert_file: "./certs/cert.pem"
+  key_file: "./certs/key.pem"
+dht:
+  enabled: true
+  listen_addrs:
+    - "/ip4/0.0.0.0/tcp/4003"
+  external_addrs:
+    - "/ip4/<公网IP>/udp/4433"
+  private_key_file: "./keys/relay_identity.key/identity.key"
+  mode: "server"
 
-# exit.yaml
-listen: ":8443"
-ohttp_private_key_file: "/etc/tokengo/keys/ohttp_private.key"
+# configs/exit-dht.yaml
+ohttp_private_key_file: "./keys/ohttp_private.key"
 ai_backend:
-  url: "http://ollama:11434"
+  url: "http://localhost:11434"
+insecure_skip_verify: true
+dht:
+  enabled: true
+  listen_addrs:
+    - "/ip4/0.0.0.0/tcp/4002"
+  private_key_file: "./keys/exit_identity.key/identity.key"
+  mode: "server"
 ```
 
 ## 密钥管理
@@ -105,13 +197,22 @@ ai_backend:
 ### OHTTP 密钥对
 
 ```bash
-make keygen  # 生成到 keys/ 目录
+tokengo keygen --type ohttp --output ./keys
+# 或
+make keygen
 ```
 
-- `ohttp_private.key` - 私钥 (Exit 节点使用)
-- `ohttp_private.key.pub` - 公钥 (Client 配置使用)
+- `keys/ohttp_private.key` - 私钥 (Exit 节点使用)
+- `keys/ohttp_private.key.pub` - 公钥 KeyConfig (Client 使用)
 
-**注意**: 每次 `make keygen` 会生成新密钥，需要同步更新客户端配置中的 `exit_public_key`。Docker 测试脚本会自动处理此同步。
+### 节点身份密钥
+
+```bash
+tokengo keygen --type identity --output ./keys/exit_identity.key
+tokengo keygen --type identity --output ./keys/relay_identity.key
+```
+
+用于 DHT 节点身份标识 (libp2p PeerID)。
 
 ### TLS 证书
 
@@ -119,80 +220,66 @@ make keygen  # 生成到 keys/ 目录
 make certs  # 生成到 certs/ 目录
 ```
 
-用于 Relay → Exit 的 HTTPS 通信。
+用于 Relay 的 QUIC TLS 配置。
 
-## Docker 部署
+## CLI 命令
 
-### docker-compose.yml
+### 子命令
 
-包含 4 个服务：
-1. `ollama` - AI 后端
-2. `exit` - 出口节点
-3. `relay` - 中继节点
-4. `client` - 客户端代理
+| 命令 | 说明 | 主要标志 |
+|------|------|---------|
+| `client` | 启动本地代理 | `--config`, `--listen`, `--insecure` |
+| `relay` | 启动中继节点 | `--config`, `--listen`, `--cert`, `--key`, `--insecure` |
+| `exit` | 启动出口节点 | `--config`, `--backend`, `--api-key`, `--header`, `--private-key`, `--insecure` |
+| `serve` | 单进程启动全部 | `--listen`, `--backend`, `--api-key`, `--header` |
+| `bootstrap` | 启动 DHT bootstrap 节点 | `--config`, `--print-peer-id` |
+| `keygen` | 生成密钥 | `--type` (ohttp/identity), `--output` |
 
-### 健康检查
+## 完整发现流程
 
-Ollama 使用 `ollama list` 命令检查健康状态（容器内无 curl）。
+```
+[Exit 启动]
+    ↓
+DHT.Provide(exit-service-cid)          # 注册自己到 DHT
+    ↓
+发现 Relay (DHT 或静态地址)
+    ↓
+QUIC 连接 Relay (ALPN: tokengo-exit)
+    ↓
+发送 Register 消息 (pubKeyHash + KeyConfig)
+    ↓
+Relay 存入 Registry，回复 RegisterAck
+    ↓
+[Exit 心跳保活]
 
-### 测试脚本
+[Relay 启动]
+    ↓
+DHT.Provide(relay-service-cid)         # 注册自己到 DHT
+    ↓
+监听 QUIC 端口 :4433
 
-`scripts/docker-test.sh`:
-1. 同步公钥到客户端配置
-2. 构建 Docker 镜像
-3. 启动所有服务
-4. 等待 Ollama 就绪
-5. 下载 llama3.2:1b 模型
-6. 执行 API 测试
-
-## 性能数据
-
-测试环境: Docker Desktop on macOS
-
-| 指标 | 数值 |
-|------|------|
-| 纯网络延迟 (OHTTP + QUIC) | < 1ms |
-| 端到端延迟 (含推理) | 1-4s |
-| OHTTP 加密开销 | 可忽略 |
-
-## 核心功能
-
-### DHT 节点发现 (internal/dht)
-
-- 基于 Kademlia 的 P2P 节点发现
-- 支持 bootstrap 节点
-- Exit 公钥存储: `DHT.PutValue("/tokengo/exit-pubkey/<peerID>")`
-- Exit 公钥获取: `DHT.GetValue("/tokengo/exit-pubkey/<peerID>")`
-- 配置文件: `configs/*-dht.yaml`
-
-### 负载均衡 (internal/loadbalancer)
-
-- 支持多个 Exit 节点
-- 轮询和加权策略
-
-## 常见问题
-
-### KeyID 不匹配
-
-错误: `解密请求失败: KeyID 不匹配`
-
-原因: 客户端配置的公钥与 Exit 节点的私钥不匹配。
-
-解决:
-1. 重新运行 `make keygen`
-2. 更新客户端配置中的 `exit_public_key`
-3. 或使用 `make docker-test` 自动同步
-
-### Ollama 健康检查失败
-
-Ollama 容器内没有 curl，已改用 `ollama list` 命令检查。
+[Client 启动]
+    ↓
+1. DHT 发现 Relay
+   - DHT.FindProviders(relay-service-cid) → Relay 列表
+   - 选择延迟最低的 Relay 连接
+    ↓
+2. 从 Relay 查询 Exit 公钥
+   - 发送 QueryExitKeys (0x12) 到 Relay
+   - 收到 ExitKeysResponse (0x13)，含所有已注册 Exit 的 KeyConfig
+   - 如失败，回退到 Bootstrap API
+    ↓
+3. 选择 Exit，加密请求，通过 QUIC 发送到 Relay
+   - 请求消息的 Target = Exit pubKeyHash
+   - Relay 查找 Registry，转发到对应 Exit 连接
+```
 
 ## 快速部署
 
 ### 一键启动 (serve 命令)
 
 ```bash
-# 本地开发
+# 本地开发（自动生成密钥和证书）
 tokengo serve --backend http://localhost:11434
 
 # 连接 OpenAI
@@ -202,92 +289,36 @@ tokengo serve --backend https://api.openai.com --api-key sk-xxx
 tokengo serve --listen :9000 --backend http://localhost:11434
 ```
 
-`serve` 命令会在单进程中启动 Client + Relay + Exit，自动生成密钥和证书，适合快速测试和单机部署。
+`serve` 命令在单进程中启动 Client + Relay + Exit，适合快速测试和单机部署。
 
 ### 分布式部署 (DHT 发现模式)
 
-**特点**: Client 零配置，自动通过公共 IPFS DHT 网络发现节点
-
 ```bash
-# 服务器 A: Exit 节点 (DHT 模式)
+# 服务器 A: Exit 节点
 tokengo exit --config configs/exit-dht.yaml --backend https://api.openai.com --api-key sk-xxx
 
-# 服务器 B: Relay 节点 (DHT 模式)
+# 服务器 B: Relay 节点
 tokengo relay --config configs/relay-dht.yaml
 
-# 本地: Client (零配置！)
+# 本地: Client（零配置，自动 DHT 发现）
 tokengo client
 ```
 
-**说明**:
-- Client 默认使用公共 IPFS DHT bootstrap 节点发现网络中的 Relay/Exit
-- Exit/Relay 需要配置 DHT 以注册服务到 DHT 网络
-- Exit 公钥存储在 DHT 中，Client 自动获取
+## Docker 部署
 
-### Client 节点发现流程
+### docker-compose.yml
 
-Client 支持三种发现方式（按优先级）：
+包含 4 个服务：ollama、exit、relay、client。
 
-1. **DHT 发现** - 通过 libp2p DHT 网络发现 Relay 和 Exit 节点（含公钥）
-2. **Bootstrap API** - 通过自建 HTTP API 获取节点列表（含 Exit 公钥）
-3. **回退地址** - 使用配置的静态地址（需配置完整 Exit 信息）
+### 测试
 
-```yaml
-# configs/client-discovery.yaml
-listen: "127.0.0.1:8080"
-
-# DHT 发现 (可选)
-dht:
-  enabled: true
-  bootstrap_peers:
-    - "/ip4/x.x.x.x/tcp/4001/p2p/QmXXX"
-
-# Bootstrap API (可选)
-bootstrap:
-  url: "https://bootstrap.example.com"
-
-# 回退地址 (需配置完整 Exit 信息)
-fallback:
-  relay_addrs:
-    - "relay.example.com:4433"
-  exits:
-    - address: "exit.example.com:8443"
-      public_key: "BASE64_OHTTP_PUBLIC_KEY"
-      key_id: 1
+```bash
+make docker-test    # 完整集成测试
+make docker-up      # 启动服务
+make docker-down    # 停止服务
+make docker-logs    # 查看日志
+make docker-clean   # 清理资源
 ```
-
-### 完整发现流程
-
-```
-[Exit 启动]
-    ↓
-DHT.Provide(exit-service-cid)  # 注册服务
-DHT.PutValue("/tokengo/exit-pubkey/<peerID>", {keyID, publicKey, address})  # 存储公钥
-    ↓
-[Client 启动]
-    ↓
-1. 尝试 DHT 发现 Relay + Exit（含公钥）
-   - DHT.FindProviders(relay-service-cid) → Relay 列表
-   - DHT.FindProviders(exit-service-cid) → Exit PeerID 列表
-   - DHT.GetValue("/tokengo/exit-pubkey/<peerID>") → {keyID, publicKey, address}
-2. 否则尝试 Bootstrap API 发现 Relay + Exit（含公钥）
-3. 否则使用回退地址（需配置完整 Exit 信息）
-    ↓
-计算最佳路由 → 选择 Relay + Exit
-    ↓
-连接 Relay → 使用 Exit 公钥加密 → 转发到 Exit
-```
-
-**关键设计变化**:
-- Exit 公钥在 DHT/Bootstrap 中直接注册，Client 发现时获取
-- Client 不再通过 Relay 获取 Exit 列表
-- Relay 只做盲转发，不知道 Exit 地址，也不维护 Exit 列表
-
-**隐私优势**:
-- Client 不需要预先配置任何节点地址
-- Relay 不知道 Exit 地址，只做盲转发
-- Exit 地址由 Client 在请求中动态指定
-- Exit 公钥分布式存储在 DHT 中
 
 ## 远端服务器
 
@@ -308,14 +339,31 @@ cd /root/tokengo/TokenGo && make build
 make build-linux
 ```
 
+## 常见问题
+
+### KeyID 不匹配
+
+错误: `解密请求失败: KeyID 不匹配`
+
+原因: Client 获取的公钥与 Exit 节点的私钥不匹配。
+
+解决: 重新运行 `make keygen`，重启 Exit 节点以重新注册 KeyConfig。
+
+### Ollama 健康检查失败
+
+Ollama 容器内没有 curl，已改用 `ollama list` 命令检查。
+
 ## 待办事项
 
 - [x] 流式响应支持 (SSE 分块加密)
-- [ ] 多 Exit 节点负载均衡
-- [x] DHT 节点发现（Exit 公钥存储/获取）
+- [x] DHT 节点发现
+- [x] Exit 反向隧道 (QUIC)
+- [x] Exit 公钥通过 Relay 分发 (QueryExitKeys)
 - [x] TLS 证书自动生成
 - [x] Client 默认使用公共 IPFS DHT（零配置启动）
 - [x] Exit 启动时打印公钥
+- [ ] 多 Exit 节点负载均衡
 - [ ] Bootstrap Server 实现
+- [ ] exit节点注册ai协议类型到relay，然后由relay注册到dht
 - [ ] 监控和指标
 - [ ] 生产环境部署文档

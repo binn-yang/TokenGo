@@ -5,7 +5,10 @@
 ## 架构
 
 ```
-Client (CLI) ──QUIC──> Relay (中继) ──HTTPS──> Exit (出口) ──HTTP──> AI服务
+                          QUIC 反向隧道 (Exit 主动连接)
+                         ┌──────────────────────────────┐
+                         ▼                              │
+Client (CLI) ──QUIC──> Relay (中继) <──QUIC── Exit (出口) ──HTTP──> AI服务
      │                    │                      │
      │   (看不到明文)       │      (看不到来源)     │
      └────────────────────┴──────────────────────┘
@@ -13,8 +16,8 @@ Client (CLI) ──QUIC──> Relay (中继) ──HTTPS──> Exit (出口) �
 ```
 
 - **Client**: 本地代理，提供 OpenAI 兼容 API，监听 `localhost:8080`
-- **Relay**: 中继节点，转发加密流量（无法解密内容），监听 `:4433`
-- **Exit**: 出口节点，解密请求并调用 AI 后端，监听 `:8443`
+- **Relay**: 中继节点，接受 Client 和 Exit 连接，盲转发加密流量，监听 `:4433`
+- **Exit**: 出口节点，通过反向隧道主动连接 Relay（无需公网 IP），解密请求并调用 AI 后端
 
 ## 快速开始
 
@@ -38,17 +41,15 @@ make build
 Client 零配置，自动通过公共 IPFS DHT 发现节点：
 
 ```bash
-# 服务器 A: Exit 节点 (DHT 模式)
+# 服务器 A: Exit 节点 (通过 DHT 发现 Relay，反向隧道连接)
 ./build/tokengo exit --config configs/exit-dht.yaml --backend http://localhost:11434
 
-# 服务器 B: Relay 节点 (DHT 模式)
+# 服务器 B: Relay 节点 (注册到 DHT，接受 Client 和 Exit 连接)
 ./build/tokengo relay --config configs/relay-dht.yaml
 
-# 本地: Client（零配置！自动发现）
+# 本地: Client（零配置！自动发现 Relay，从 Relay 查询 Exit 公钥）
 ./build/tokengo client
 ```
-
-Client 默认使用公共 IPFS DHT bootstrap 节点，自动发现网络中的 Relay 和 Exit。
 
 ### Docker 一键测试
 
@@ -117,21 +118,27 @@ make build
 
 如需使用配置文件，编辑 `configs/` 目录：
 
-- `exit.yaml`: 配置 AI 后端地址和密钥路径
-- `relay.yaml`: 配置 TLS 证书
-- `client.yaml`: 配置 Relay 地址和 Exit 公钥
+- `configs/client.yaml`: Client 配置（DHT 发现 + Bootstrap API）
+- `configs/relay-dht.yaml`: Relay 配置（QUIC 监听 + DHT 注册）
+- `configs/exit-dht.yaml`: Exit 配置（AI 后端 + DHT 发现 Relay）
 
 ```bash
-make run-exit    # 使用 configs/exit.yaml
-make run-relay   # 使用 configs/relay.yaml
 make run-client  # 使用 configs/client.yaml
+make run-relay   # 使用 configs/relay-dht.yaml
+make run-exit    # 使用 configs/exit-dht.yaml
 ```
 
 #### 5. 手动生成密钥（可选）
 
 ```bash
-make keygen  # 生成 OHTTP 密钥对
-make certs   # 生成 TLS 证书
+# OHTTP 密钥对（Exit 加解密用）
+tokengo keygen --type ohttp --output ./keys
+
+# 节点身份密钥（DHT PeerID 用）
+tokengo keygen --type identity --output ./keys/exit_identity.key
+
+# TLS 证书
+make certs
 ```
 
 ## 性能测试
@@ -157,15 +164,19 @@ tokengo exit --config configs/exit-dht.yaml --backend http://localhost:11434
 tokengo relay --config configs/relay-dht.yaml
 tokengo client  # 零配置！自动使用公共 IPFS DHT 发现节点
 
-# 生成密钥对
-tokengo keygen --output ./keys
+# 生成密钥
+tokengo keygen --type ohttp --output ./keys        # OHTTP 密钥对
+tokengo keygen --type identity --output ./keys/id   # 节点身份密钥
+
+# DHT Bootstrap 节点
+tokengo bootstrap --config configs/bootstrap.yaml
 ```
 
 **零配置**: `tokengo client` 默认使用公共 IPFS DHT 网络发现节点，无需任何配置。
 
-**自动生成**: Exit/Relay 启动时自动生成 TLS 证书和 OHTTP 密钥。
+**反向隧道**: Exit 主动连接 Relay，无需公网 IP。
 
-**隐私优势**: Relay 采用盲转发模式，不知道 Exit 地址，只从请求消息中提取目标进行转发。
+**隐私优势**: Relay 采用盲转发模式，根据请求中的 pubKeyHash 转发到对应 Exit。
 
 ## 项目结构
 
@@ -174,13 +185,13 @@ TokenGo/
 ├── cmd/tokengo/       # CLI 入口
 ├── internal/
 │   ├── client/        # 客户端代理
-│   ├── relay/         # 中继节点
-│   ├── exit/          # 出口节点
+│   ├── relay/         # 中继节点 (QUIC 服务 + Exit 注册表)
+│   ├── exit/          # 出口节点 (反向隧道 + OHTTP 解密)
 │   ├── crypto/        # OHTTP/HPKE 加密
-│   ├── protocol/      # 协议定义
-│   ├── dht/           # DHT 节点发现
-│   ├── identity/      # 节点身份
-│   └── loadbalancer/  # 负载均衡
+│   ├── protocol/      # 二进制消息协议
+│   ├── dht/           # DHT 服务发现 (libp2p Kademlia)
+│   ├── config/        # 配置解析
+│   └── identity/      # 节点身份
 ├── pkg/openai/        # OpenAI API 兼容层
 ├── configs/           # 配置文件
 │   └── docker/        # Docker 专用配置
@@ -193,8 +204,9 @@ TokenGo/
 
 - **Go 1.21+**
 - **OHTTP (RFC 9458)** - 端到端加密
-- **QUIC (RFC 9000)** - 传输层
+- **QUIC (RFC 9000)** - 传输层 (含反向隧道)
 - **HPKE** - X25519, HKDF-SHA256, AES-128-GCM
+- **libp2p Kademlia DHT** - 去中心化服务发现
 
 ## 许可证
 
