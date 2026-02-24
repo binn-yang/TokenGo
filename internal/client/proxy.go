@@ -236,25 +236,37 @@ func (p *LocalProxy) discoverAndConnect(ctx context.Context) error {
 }
 
 // extractRelayAddrFromPeerInfo 从 peer.AddrInfo 提取 host:port 地址
+// 优先返回 UDP 地址（QUIC 服务运行在 UDP 上），TCP 地址仅作为回退
 func extractRelayAddrFromPeerInfo(info peer.AddrInfo) string {
+	var fallbackAddr string
+
 	for _, addr := range info.Addrs {
 		addrStr := addr.String()
-		// 解析 multiaddr 格式: /ip4/x.x.x.x/tcp/4433 或 /ip4/x.x.x.x/udp/4433/quic
 		parts := strings.Split(addrStr, "/")
 		var ip, port string
+		var isUDP bool
 		for i := 0; i < len(parts)-1; i++ {
 			if parts[i] == "ip4" || parts[i] == "ip6" {
 				ip = parts[i+1]
 			}
-			if parts[i] == "tcp" || parts[i] == "udp" {
+			if parts[i] == "udp" {
+				port = parts[i+1]
+				isUDP = true
+			} else if parts[i] == "tcp" {
 				port = parts[i+1]
 			}
 		}
 		if ip != "" && port != "" {
-			return fmt.Sprintf("%s:%s", ip, port)
+			result := fmt.Sprintf("%s:%s", ip, port)
+			if isUDP {
+				return result // UDP 优先，直接返回
+			}
+			if fallbackAddr == "" {
+				fallbackAddr = result
+			}
 		}
 	}
-	return ""
+	return fallbackAddr
 }
 
 // handleRequest 统一请求处理 (协议无关)
