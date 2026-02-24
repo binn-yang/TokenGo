@@ -74,6 +74,23 @@ func (r *Registry) Remove(pubKeyHash string) {
 	}
 }
 
+// RemoveIfMatch 移除 Exit 节点，但只有在连接匹配时才移除（避免 TOCTOU 竞争）
+func (r *Registry) RemoveIfMatch(pubKeyHash string, conn quic.Connection) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if entry, ok := r.entries[pubKeyHash]; ok {
+		if entry.Conn == conn { // 比较连接是否相同
+			delete(r.entries, pubKeyHash)
+			log.Printf("Exit 已移除 (匹配): %s, 当前注册数: %d", pubKeyHash, len(r.entries))
+			return true
+		}
+		log.Printf("Exit %s 连接已更新，跳过移除", pubKeyHash)
+		return false
+	}
+	return false
+}
+
 // UpdateHeartbeat 更新心跳时间
 func (r *Registry) UpdateHeartbeat(pubKeyHash string) {
 	r.mu.Lock()

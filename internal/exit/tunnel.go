@@ -61,14 +61,22 @@ func (t *TunnelClient) Start(ctx context.Context) error {
 	log.Printf("已注册到 Relay %s (pubKeyHash=%s)", addr, t.pubKeyHash)
 
 	// 3. 启动心跳和流接收 goroutine
+	// 在锁保护下捕获 conn 值，避免数据竞争
+	t.connMu.Lock()
+	conn := t.conn
+	t.connMu.Unlock()
+
 	connCtx, connCancel := context.WithCancel(ctx)
 	go func() {
-		// 当 QUIC 连接断开时取消 connCtx
-		<-t.conn.Context().Done()
+		// 当 QUIC 连接断开或 Stop() 被调用时取消 connCtx
+		select {
+		case <-conn.Context().Done():
+		case <-t.ctx.Done():
+		}
 		connCancel()
 	}()
 	go t.heartbeatLoop(connCtx)
-	go t.acceptStreams(connCtx)
+	go t.acceptStreams(connCtx, conn)
 
 	// 4. 启动重连循环 (阻塞)
 	t.reconnectLoop(ctx)
@@ -192,9 +200,9 @@ func (t *TunnelClient) connectAndRegister(ctx context.Context, addr string) erro
 }
 
 // acceptStreams 循环接收 Relay 转发过来的流
-func (t *TunnelClient) acceptStreams(ctx context.Context) {
+func (t *TunnelClient) acceptStreams(ctx context.Context, conn quic.Connection) {
 	for {
-		stream, err := t.conn.AcceptStream(ctx)
+		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				// 上下文取消，正常退出
@@ -345,7 +353,13 @@ func (t *TunnelClient) reconnectLoop(ctx context.Context) {
 
 			log.Printf("尝试重连 Relay (退避 %v)...", backoff)
 
-			time.Sleep(backoff)
+			// 使用 select 替换 time.Sleep，以便响应 Stop()
+			select {
+			case <-time.After(backoff):
+				// 继续退避
+			case <-t.ctx.Done():
+				return // 立即响应 shutdown
+			}
 
 			// 重新选择 Relay
 			addr, err := t.selectRelay(ctx)
@@ -365,13 +379,22 @@ func (t *TunnelClient) reconnectLoop(ctx context.Context) {
 			log.Printf("重连成功，已重新注册到 Relay %s", addr)
 
 			// 重连成功，重新启动心跳和流接收
+			// 在锁保护下捕获 conn 值，避免数据竞争
+			t.connMu.Lock()
+			conn := t.conn
+			t.connMu.Unlock()
+
 			connCtx, connCancel := context.WithCancel(ctx)
 			go func() {
-				<-t.conn.Context().Done()
+				// 当 QUIC 连接断开或 Stop() 被调用时取消 connCtx
+				select {
+				case <-conn.Context().Done():
+				case <-t.ctx.Done():
+				}
 				connCancel()
 			}()
 			go t.heartbeatLoop(connCtx)
-			go t.acceptStreams(connCtx)
+			go t.acceptStreams(connCtx, conn)
 
 			break // 退出退避循环，回到外层等待断开
 		}

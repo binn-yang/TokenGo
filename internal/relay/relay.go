@@ -143,3 +143,8 @@ func (r *RelayNode) Stop() error {
 	r.cancel()
 	return r.quicServer.Stop()
 }
+
+// Ready 返回就绪信号 channel，当 Relay 节点成功启动后会关闭该 channel
+func (r *RelayNode) Ready() <-chan struct{} {
+	return r.quicServer.Ready()
+}

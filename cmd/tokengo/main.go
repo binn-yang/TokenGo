@@ -347,8 +347,9 @@ func serveCmd() *cobra.Command {
 				}
 			}()
 
-			// 等待 Relay 就绪
-			time.Sleep(500 * time.Millisecond)
+			// 等待 Relay 就绪（使用 Ready channel 替代 time.Sleep）
+			<-r.Ready()
+			log.Printf("Relay 已就绪")
 
 			// 启动 Exit (通过反向隧道连接本地 Relay)
 			e, err := exit.New(exitCfg)
@@ -361,8 +362,8 @@ func serveCmd() *cobra.Command {
 				}
 			}()
 
-			// 等待 Exit 隧道建立
-			time.Sleep(500 * time.Millisecond)
+			// 等待 Exit 隧道建立（Exit 尚未实现 Ready，使用较短的超时）
+			time.Sleep(100 * time.Millisecond)
 
 			// 启动 Client (静态模式)
 			proxy, err := client.NewStaticProxy(

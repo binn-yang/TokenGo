@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/binn/tokengo/internal/protocol"
 	"github.com/quic-go/quic-go"
@@ -19,6 +20,8 @@ type QUICServer struct {
 	addr      string
 	tlsConfig *tls.Config
 	wg        sync.WaitGroup // 追踪所有 goroutine
+	ready     chan struct{}
+	readyOnce sync.Once
 }
 
 // NewQUICServer 创建 QUIC 服务器
@@ -27,6 +30,7 @@ func NewQUICServer(addr string, tlsConfig *tls.Config, registry *Registry) *QUIC
 		addr:      addr,
 		tlsConfig: tlsConfig,
 		registry:  registry,
+		ready:     make(chan struct{}),
 	}
 }
 
@@ -44,6 +48,9 @@ func (s *QUICServer) Start(ctx context.Context) error {
 		return fmt.Errorf("启动 QUIC 监听失败: %w", err)
 	}
 	s.listener = listener
+
+	// 标记为就绪
+	s.readyOnce.Do(func() { close(s.ready) })
 
 	log.Printf("QUIC 服务器启动，监听 %s", s.addr)
 
@@ -160,19 +167,18 @@ func (s *QUICServer) handleExitConnection(ctx context.Context, conn quic.Connect
 		return
 	}
 
-	// 4. 注册到 registry
-	s.registry.Register(pubKeyHash, conn)
-
-	// 5. 发送 RegisterAck
+	// 4. 先发送 RegisterAck，再注册（避免注册窗口期的请求被路由到未就绪的 Exit）
 	ackMsg := protocol.NewRegisterAckMessage(nil)
 	if _, err := regStream.Write(ackMsg.Encode()); err != nil {
 		log.Printf("Exit %s: 发送 RegisterAck 失败: %v", pubKeyHash, err)
 		regStream.Close()
-		s.registry.Remove(pubKeyHash)
 		conn.CloseWithError(1, "send register ack failed")
 		return
 	}
 	regStream.Close()
+
+	// 5. 然后注册到 registry
+	s.registry.Register(pubKeyHash, conn)
 
 	log.Printf("Exit %s: 注册完成，开始心跳监听", pubKeyHash)
 
@@ -263,12 +269,15 @@ func (s *QUICServer) handleForwardRequest(stream quic.Stream, msg *protocol.Mess
 		return
 	}
 
-	// 在 Exit 连接上打开新流
-	exitStream, err := exitConn.OpenStreamSync(context.Background())
+	// 在 Exit 连接上打开新流（使用带超时的 context，避免客户端断开后阻塞）
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	exitStream, err := exitConn.OpenStreamSync(ctx)
 	if err != nil {
 		log.Printf("打开 Exit %s 流失败: %v", msg.Target, err)
-		// Exit 连接可能已断开，移除
-		s.registry.Remove(msg.Target)
+		// Exit 连接可能已断开，只移除匹配的连接（避免 TOCTOU 竞争）
+		s.registry.RemoveIfMatch(msg.Target, exitConn)
 		errMsg := protocol.NewErrorMessage("exit connection failed")
 		stream.Write(errMsg.Encode())
 		return
@@ -317,11 +326,15 @@ func (s *QUICServer) handleStreamForwardRequest(stream quic.Stream, msg *protoco
 		return
 	}
 
-	// 在 Exit 连接上打开新流
-	exitStream, err := exitConn.OpenStreamSync(context.Background())
+	// 在 Exit 连接上打开新流（使用带超时的 context，避免客户端断开后阻塞）
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	exitStream, err := exitConn.OpenStreamSync(ctx)
 	if err != nil {
 		log.Printf("打开 Exit %s 流失败: %v", msg.Target, err)
-		s.registry.Remove(msg.Target)
+		// Exit 连接可能已断开，只移除匹配的连接（避免 TOCTOU 竞争）
+		s.registry.RemoveIfMatch(msg.Target, exitConn)
 		errMsg := protocol.NewErrorMessage("exit connection failed")
 		stream.Write(errMsg.Encode())
 		return
@@ -369,4 +382,9 @@ func (s *QUICServer) Stop() error {
 		return err
 	}
 	return nil
+}
+
+// Ready 返回就绪信号 channel，当 QUIC 服务器成功启动监听后会关闭该 channel
+func (s *QUICServer) Ready() <-chan struct{} {
+	return s.ready
 }
