@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/binn/tokengo/internal/protocol"
 	"github.com/quic-go/quic-go"
 )
 
@@ -13,6 +14,7 @@ import (
 type ExitEntry struct {
 	PubKeyHash    string
 	Conn          quic.Connection
+	KeyConfig     []byte // OHTTP KeyConfig (RFC 9458)
 	RegisteredAt  time.Time
 	LastHeartbeat time.Time
 }
@@ -31,7 +33,7 @@ func NewRegistry() *Registry {
 }
 
 // Register 注册 Exit 节点，如果已有旧连接则关闭旧的
-func (r *Registry) Register(pubKeyHash string, conn quic.Connection) {
+func (r *Registry) Register(pubKeyHash string, conn quic.Connection, keyConfig []byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -45,6 +47,7 @@ func (r *Registry) Register(pubKeyHash string, conn quic.Connection) {
 	r.entries[pubKeyHash] = &ExitEntry{
 		PubKeyHash:    pubKeyHash,
 		Conn:          conn,
+		KeyConfig:     keyConfig,
 		RegisteredAt:  now,
 		LastHeartbeat: now,
 	}
@@ -132,6 +135,23 @@ func (r *Registry) cleanup(timeout time.Duration) {
 			delete(r.entries, hash)
 		}
 	}
+}
+
+// ListExitKeys 返回所有已注册 Exit 的公钥信息
+func (r *Registry) ListExitKeys() []protocol.ExitKeyEntry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var entries []protocol.ExitKeyEntry
+	for _, entry := range r.entries {
+		if len(entry.KeyConfig) > 0 {
+			entries = append(entries, protocol.ExitKeyEntry{
+				PubKeyHash: entry.PubKeyHash,
+				KeyConfig:  entry.KeyConfig,
+			})
+		}
+	}
+	return entries
 }
 
 // Count 返回已注册的 Exit 数量

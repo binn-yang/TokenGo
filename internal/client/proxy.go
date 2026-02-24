@@ -16,6 +16,7 @@ import (
 
 	"github.com/binn/tokengo/internal/bootstrap"
 	"github.com/binn/tokengo/internal/config"
+	"github.com/binn/tokengo/internal/crypto"
 	"github.com/binn/tokengo/internal/dht"
 )
 
@@ -154,8 +155,8 @@ func (p *LocalProxy) Start() error {
 	return p.server.ListenAndServe()
 }
 
-// discoverAndConnect 发现节点并连接 (DHT → Bootstrap API)
-// 新架构：Exit 公钥直接从 DHT/Bootstrap 获取，不再通过 Relay
+// discoverAndConnect 发现节点并连接
+// 新架构：先连接 Relay，再从 Relay 查询 Exit 公钥
 func (p *LocalProxy) discoverAndConnect(ctx context.Context) error {
 	// 1. 创建 Discovery 并持久化（重连时 Client 自动走 connectWithDiscovery）
 	if p.dhtNode != nil {
@@ -165,51 +166,54 @@ func (p *LocalProxy) discoverAndConnect(ctx context.Context) error {
 		log.Println("DHT Discovery 已持久化到 Client")
 	}
 
-	// 2. 发现 Exit 公钥 (DHT → Bootstrap)
-	exitInfo := p.discoverExit(ctx)
-	if exitInfo == nil || exitInfo.PublicKey == nil {
-		return fmt.Errorf("无法发现 Exit 节点（含公钥）(请确保 DHT 或 Bootstrap API 配置正确)")
-	}
-
-	// 设置 Exit（公钥已在发现时获取）
-	if err := p.client.SetExit(exitInfo.KeyID, exitInfo.PublicKey); err != nil {
-		return fmt.Errorf("设置 Exit 失败: %w", err)
-	}
-	log.Printf("已选择 Exit 公钥哈希: %s", p.client.GetExitPubKeyHash())
-
-	// 3. 连接 Relay（Client 内部走 connectWithDiscovery）
+	// 2. 先连接 Relay（Client 内部走 connectWithDiscovery）
 	if err := p.client.Connect(ctx); err != nil {
 		return fmt.Errorf("连接 Relay 失败: %w", err)
 	}
 	log.Printf("已连接到 Relay: %s", p.client.GetRelayAddr())
 
+	// 3. 从 Relay 查询 Exit 公钥（回退到 Bootstrap API）
+	keyID, publicKey, err := p.discoverExit(ctx)
+	if err != nil {
+		return fmt.Errorf("发现 Exit 失败: %w", err)
+	}
+
+	// 4. 设置 Exit
+	if err := p.client.SetExit(keyID, publicKey); err != nil {
+		return fmt.Errorf("设置 Exit 失败: %w", err)
+	}
+	log.Printf("已选择 Exit 公钥哈希: %s", p.client.GetExitPubKeyHash())
+
 	return nil
 }
 
-// discoverExit 发现 Exit 节点（含公钥）(DHT → Bootstrap API)
-func (p *LocalProxy) discoverExit(ctx context.Context) *dht.ExitNodeInfo {
-	// DHT 发现 Exit（含公钥）
-	if p.discovery != nil {
-		exits, err := p.discovery.DiscoverExitsWithKeys(ctx)
-		if err == nil && len(exits) > 0 {
-			log.Printf("DHT 发现 Exit (含公钥, KeyID: %d)", exits[0].KeyID)
-			return &exits[0]
+// discoverExit 从 Relay 查询 Exit 公钥，回退到 Bootstrap API
+func (p *LocalProxy) discoverExit(ctx context.Context) (keyID uint8, publicKey []byte, err error) {
+	// 从已连接的 Relay 查询 Exit 公钥列表
+	entries, queryErr := p.client.QueryExitKeys(ctx)
+	if queryErr == nil && len(entries) > 0 {
+		entry := entries[0]
+		kid, pubKey, decodeErr := crypto.DecodeKeyConfig(entry.KeyConfig)
+		if decodeErr == nil {
+			log.Printf("从 Relay 获取 Exit 公钥 (KeyID: %d, Hash: %s)", kid, entry.PubKeyHash)
+			return kid, pubKey, nil
 		}
-		log.Printf("DHT 发现 Exit 失败: %v", err)
+		log.Printf("解析 Exit KeyConfig 失败: %v", decodeErr)
+	}
+	if queryErr != nil {
+		log.Printf("从 Relay 查询 Exit 公钥失败: %v", queryErr)
 	}
 
-	// Bootstrap API 发现 Exit（含公钥）
+	// Bootstrap API 回退
 	if p.bootstrapClient != nil {
 		exits := p.bootstrapClient.GetExits()
 		if len(exits) > 0 && exits[0].PublicKey != nil {
 			log.Printf("Bootstrap API 发现 Exit (含公钥)")
-			return &dht.ExitNodeInfo{
-				PublicKey: exits[0].PublicKey,
-			}
+			return 0, exits[0].PublicKey, nil
 		}
 	}
 
-	return nil
+	return 0, nil, fmt.Errorf("无法发现 Exit 节点公钥 (请确保 Relay 有已注册的 Exit 或 Bootstrap API 配置正确)")
 }
 
 // handleRequest 统一请求处理 (协议无关)

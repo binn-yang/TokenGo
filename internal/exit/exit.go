@@ -80,6 +80,9 @@ func newExitNode(cfg *config.ExitConfig, staticRelay string) (*ExitNode, error) 
 	// 计算公钥哈希 (用于在 Relay 侧标识此 Exit)
 	pubKeyHash := crypto.PubKeyHash(publicKey)
 
+	// 编码 KeyConfig (注册到 Relay 时附带，供 Client 查询)
+	keyConfig := crypto.EncodeKeyConfig(keyID, publicKey)
+
 	node := &ExitNode{
 		cfg:         cfg,
 		ohttpHandler: ohttpHandler,
@@ -90,7 +93,7 @@ func newExitNode(cfg *config.ExitConfig, staticRelay string) (*ExitNode, error) 
 
 	// 静态模式（用于 serve 命令）
 	if staticRelay != "" {
-		node.tunnel = NewTunnelClientStatic(staticRelay, pubKeyHash, ohttpHandler, cfg.InsecureSkipVerify)
+		node.tunnel = NewTunnelClientStatic(staticRelay, pubKeyHash, keyConfig, ohttpHandler, cfg.InsecureSkipVerify)
 		return node, nil
 	}
 
@@ -115,7 +118,7 @@ func newExitNode(cfg *config.ExitConfig, staticRelay string) (*ExitNode, error) 
 	node.provider = dht.NewProvider(dhtNode, "exit")
 
 	// 创建反向隧道客户端（传入 DHT 发现器）
-	node.tunnel = NewTunnelClient(node.discovery, pubKeyHash, ohttpHandler, cfg.InsecureSkipVerify)
+	node.tunnel = NewTunnelClient(node.discovery, pubKeyHash, keyConfig, ohttpHandler, cfg.InsecureSkipVerify)
 
 	return node, nil
 }

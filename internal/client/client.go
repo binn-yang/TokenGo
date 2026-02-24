@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -425,6 +426,48 @@ func (c *Client) GetCurrentRelayID() peer.ID {
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
 	return c.currentRelayID
+}
+
+// QueryExitKeys 从已连接的 Relay 查询 Exit 公钥列表
+func (c *Client) QueryExitKeys(ctx context.Context) ([]protocol.ExitKeyEntry, error) {
+	conn, err := c.getConnection(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("获取连接失败: %w", err)
+	}
+
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("创建流失败: %w", err)
+	}
+	defer stream.Close()
+
+	// 发送查询消息
+	queryMsg := protocol.NewQueryExitKeysMessage()
+	if _, err := stream.Write(queryMsg.Encode()); err != nil {
+		return nil, fmt.Errorf("发送查询消息失败: %w", err)
+	}
+
+	// 读取响应
+	respMsg, err := protocol.Decode(stream)
+	if err != nil {
+		return nil, fmt.Errorf("读取响应失败: %w", err)
+	}
+
+	if respMsg.Type == protocol.MessageTypeError {
+		return nil, fmt.Errorf("服务端错误: %s", string(respMsg.Payload))
+	}
+
+	if respMsg.Type != protocol.MessageTypeExitKeysResponse {
+		return nil, fmt.Errorf("期望 ExitKeysResponse，收到类型 0x%02x", respMsg.Type)
+	}
+
+	// 解析 JSON payload
+	var entries []protocol.ExitKeyEntry
+	if err := json.Unmarshal(respMsg.Payload, &entries); err != nil {
+		return nil, fmt.Errorf("解析 Exit 公钥列表失败: %w", err)
+	}
+
+	return entries, nil
 }
 
 // SetExit 设置 Exit 节点（自动计算公钥哈希）

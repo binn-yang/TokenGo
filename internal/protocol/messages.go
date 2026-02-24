@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 )
@@ -25,6 +26,11 @@ const (
 	MessageTypeRegister MessageType = 0x10
 	// MessageTypeRegisterAck Relay→Exit 注册确认
 	MessageTypeRegisterAck MessageType = 0x11
+
+	// MessageTypeQueryExitKeys Client→Relay: 查询 Exit 公钥列表
+	MessageTypeQueryExitKeys MessageType = 0x12
+	// MessageTypeExitKeysResponse Relay→Client: 返回 Exit 公钥列表
+	MessageTypeExitKeysResponse MessageType = 0x13
 
 	// MessageTypeHeartbeat Exit→Relay 心跳
 	MessageTypeHeartbeat MessageType = 0x20
@@ -183,5 +189,27 @@ func NewHeartbeatMessage() *Message {
 func NewHeartbeatAckMessage() *Message {
 	return &Message{
 		Type: MessageTypeHeartbeatAck,
+	}
+}
+
+// ExitKeyEntry Exit 公钥条目 (用于 Relay 返回给 Client)
+type ExitKeyEntry struct {
+	PubKeyHash string `json:"pub_key_hash"`
+	KeyConfig  []byte `json:"key_config"` // OHTTP KeyConfig 编码 (RFC 9458)
+}
+
+// NewQueryExitKeysMessage 创建查询 Exit 公钥列表消息 (Client → Relay)
+func NewQueryExitKeysMessage() *Message {
+	return &Message{
+		Type: MessageTypeQueryExitKeys,
+	}
+}
+
+// NewExitKeysResponseMessage 创建 Exit 公钥列表响应消息 (Relay → Client)
+func NewExitKeysResponseMessage(entries []ExitKeyEntry) *Message {
+	data, _ := json.Marshal(entries)
+	return &Message{
+		Type:    MessageTypeExitKeysResponse,
+		Payload: data,
 	}
 }

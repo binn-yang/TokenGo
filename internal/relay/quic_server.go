@@ -177,8 +177,8 @@ func (s *QUICServer) handleExitConnection(ctx context.Context, conn quic.Connect
 	}
 	regStream.Close()
 
-	// 5. 然后注册到 registry
-	s.registry.Register(pubKeyHash, conn)
+	// 5. 然后注册到 registry (附带 KeyConfig)
+	s.registry.Register(pubKeyHash, conn, msg.Payload)
 
 	log.Printf("Exit %s: 注册完成，开始心跳监听", pubKeyHash)
 
@@ -243,6 +243,10 @@ func (s *QUICServer) handleStream(stream quic.Stream) {
 		s.handleForwardRequest(stream, msg)
 	case protocol.MessageTypeStreamRequest:
 		s.handleStreamForwardRequest(stream, msg)
+	case protocol.MessageTypeQueryExitKeys:
+		entries := s.registry.ListExitKeys()
+		resp := protocol.NewExitKeysResponseMessage(entries)
+		stream.Write(resp.Encode())
 	default:
 		log.Printf("无效的消息类型: %d", msg.Type)
 		errMsg := protocol.NewErrorMessage("invalid message type")

@@ -22,6 +22,7 @@ type TunnelClient struct {
 	discovery       *dht.Discovery
 	staticRelayAddr string // 静态 Relay 地址（用于 serve 命令）
 	pubKeyHash      string
+	keyConfig       []byte // OHTTP KeyConfig (注册时发送给 Relay)
 	tlsConfig       *tls.Config
 	ohttpHandler    *OHTTPHandler
 	conn            quic.Connection
@@ -32,7 +33,7 @@ type TunnelClient struct {
 }
 
 // NewTunnelClient 创建反向隧道客户端（DHT 发现模式）
-func NewTunnelClient(discovery *dht.Discovery, pubKeyHash string, ohttpHandler *OHTTPHandler, insecureSkipVerify bool) *TunnelClient {
+func NewTunnelClient(discovery *dht.Discovery, pubKeyHash string, keyConfig []byte, ohttpHandler *OHTTPHandler, insecureSkipVerify bool) *TunnelClient {
 	tlsConfig := &tls.Config{
 		NextProtos:         []string{"tokengo-exit"},
 		InsecureSkipVerify: insecureSkipVerify,
@@ -42,6 +43,7 @@ func NewTunnelClient(discovery *dht.Discovery, pubKeyHash string, ohttpHandler *
 	return &TunnelClient{
 		discovery:    discovery,
 		pubKeyHash:   pubKeyHash,
+		keyConfig:    keyConfig,
 		tlsConfig:    tlsConfig,
 		ohttpHandler: ohttpHandler,
 		ctx:          ctx,
@@ -50,7 +52,7 @@ func NewTunnelClient(discovery *dht.Discovery, pubKeyHash string, ohttpHandler *
 }
 
 // NewTunnelClientStatic 创建反向隧道客户端（静态地址模式，用于 serve 命令）
-func NewTunnelClientStatic(relayAddr string, pubKeyHash string, ohttpHandler *OHTTPHandler, insecureSkipVerify bool) *TunnelClient {
+func NewTunnelClientStatic(relayAddr string, pubKeyHash string, keyConfig []byte, ohttpHandler *OHTTPHandler, insecureSkipVerify bool) *TunnelClient {
 	tlsConfig := &tls.Config{
 		NextProtos:         []string{"tokengo-exit"},
 		InsecureSkipVerify: insecureSkipVerify,
@@ -60,6 +62,7 @@ func NewTunnelClientStatic(relayAddr string, pubKeyHash string, ohttpHandler *OH
 	return &TunnelClient{
 		staticRelayAddr: relayAddr,
 		pubKeyHash:      pubKeyHash,
+		keyConfig:       keyConfig,
 		tlsConfig:       tlsConfig,
 		ohttpHandler:    ohttpHandler,
 		ctx:             ctx,
@@ -254,8 +257,8 @@ func (t *TunnelClient) connectAndRegister(ctx context.Context, addr string) erro
 		return fmt.Errorf("打开注册流失败: %w", err)
 	}
 
-	// 3. 发送注册消息
-	regMsg := protocol.NewRegisterMessage(t.pubKeyHash, nil)
+	// 3. 发送注册消息 (附带 KeyConfig)
+	regMsg := protocol.NewRegisterMessage(t.pubKeyHash, t.keyConfig)
 	if _, err := stream.Write(regMsg.Encode()); err != nil {
 		stream.Close()
 		conn.CloseWithError(1, "write register failed")
