@@ -191,24 +191,37 @@ func (t *TunnelClient) selectBestRelay(ctx context.Context, relays []peer.AddrIn
 }
 
 // extractRelayAddrFromPeerInfo 从 peer.AddrInfo 提取 host:port
+// 优先返回 UDP 地址（QUIC 服务运行在 UDP 上），TCP 地址仅作为回退
 func extractRelayAddrFromPeerInfo(info peer.AddrInfo) string {
+	var fallbackAddr string
+
 	for _, addr := range info.Addrs {
 		addrStr := addr.String()
 		parts := strings.Split(addrStr, "/")
 		var ip, port string
+		var isUDP bool
 		for i := 0; i < len(parts)-1; i++ {
 			if parts[i] == "ip4" || parts[i] == "ip6" {
 				ip = parts[i+1]
 			}
-			if parts[i] == "tcp" || parts[i] == "udp" {
+			if parts[i] == "udp" {
+				port = parts[i+1]
+				isUDP = true
+			} else if parts[i] == "tcp" {
 				port = parts[i+1]
 			}
 		}
 		if ip != "" && port != "" {
-			return fmt.Sprintf("%s:%s", ip, port)
+			result := fmt.Sprintf("%s:%s", ip, port)
+			if isUDP {
+				return result // UDP 优先，直接返回
+			}
+			if fallbackAddr == "" {
+				fallbackAddr = result
+			}
 		}
 	}
-	return ""
+	return fallbackAddr
 }
 
 // probeRelay 探测 Relay 的 RTT (QUIC 握手时间)
