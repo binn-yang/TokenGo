@@ -190,23 +190,24 @@ Relay 采用盲转发模式：Exit 地址由 Client 在请求中指定，Relay �
 // exitCmd 出口节点命令
 func exitCmd() *cobra.Command {
 	var configPath string
-	var relayAddrs, backend, apiKey, privateKeyFile string
+	var backend, apiKey, privateKeyFile string
 	var headers []string
 	var insecure bool
 
 	cmd := &cobra.Command{
 		Use:   "exit",
 		Short: "启动出口节点 (OHTTP 网关)",
-		Long: `启动出口节点，通过反向隧道连接 Relay，解密 OHTTP 请求并转发到 AI 后端。
+		Long: `启动出口节点，通过 DHT 发现 Relay 并建立反向隧道，解密 OHTTP 请求并转发到 AI 后端。
 
 Exit 节点主动连接 Relay（无需公网 IP），通过 QUIC 反向隧道接收请求。
+必须启用 DHT 配置以发现 Relay 节点。
 
 示例:
-  # 连接到 Relay 并使用本地 Ollama
-  tokengo exit --relay relay.example.com:4433 --backend http://localhost:11434
+  # 使用配置文件 (推荐)
+  tokengo exit --config configs/exit-dht.yaml
 
-  # 连接多个 Relay (逗号分隔)
-  tokengo exit --relay relay1:4433,relay2:4433 --backend https://api.openai.com --api-key sk-xxx`,
+  # 指定 AI 后端
+  tokengo exit --config configs/exit-dht.yaml --backend https://api.openai.com --api-key sk-xxx`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var cfg *config.ExitConfig
 			var err error
@@ -214,15 +215,15 @@ Exit 节点主动连接 Relay（无需公网 IP），通过 QUIC 反向隧道接
 			// 优先使用命令行参数
 			if backend != "" {
 				headerMap := parseHeaders(headers)
-				var relays []string
-				if relayAddrs != "" {
-					relays = strings.Split(relayAddrs, ",")
-				}
 				cfg = &config.ExitConfig{
-					RelayAddrs:          relays,
 					OHTTPPrivateKeyFile: privateKeyFile,
 					AIBackend:           config.AIBackend{URL: backend, APIKey: apiKey, Headers: headerMap},
 					InsecureSkipVerify:  insecure,
+					DHT: config.DHTConfig{
+						Enabled:          true,
+						UseIPFSBootstrap: true,
+						ListenAddrs:      []string{"/ip4/0.0.0.0/tcp/0"},
+					},
 				}
 				// 如果没有指定密钥，自动生成
 				if privateKeyFile == "" {
@@ -241,15 +242,13 @@ Exit 节点主动连接 Relay（无需公网 IP），通过 QUIC 反向隧道接
 			}
 
 			// 命令行覆盖
-			if cmd.Flags().Changed("relay") {
-				cfg.RelayAddrs = strings.Split(relayAddrs, ",")
-			}
 			if cmd.Flags().Changed("insecure") {
 				cfg.InsecureSkipVerify = insecure
 			}
 
-			if len(cfg.RelayAddrs) == 0 {
-				return fmt.Errorf("必须指定 --relay 参数或配置 relay_addrs")
+			// DHT 必须启用 (exit.New 会再次检查，但这里提前给出友好提示)
+			if !cfg.DHT.Enabled {
+				return fmt.Errorf("必须启用 DHT 配置以发现 Relay 节点，请在配置文件中设置 dht.enabled: true")
 			}
 
 			e, err := exit.New(cfg)
@@ -262,7 +261,6 @@ Exit 节点主动连接 Relay（无需公网 IP），通过 QUIC 反向隧道接
 	}
 
 	cmd.Flags().StringVarP(&configPath, "config", "c", "configs/exit.yaml", "配置文件路径")
-	cmd.Flags().StringVar(&relayAddrs, "relay", "", "Relay 地址列表 (逗号分隔，如 relay1:4433,relay2:4433)")
 	cmd.Flags().StringVarP(&backend, "backend", "b", "", "AI 后端地址 (如: http://localhost:11434)")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "AI 后端 API Key")
 	cmd.Flags().StringArrayVar(&headers, "header", nil, "自定义后端请求头 (格式: Key:Value，可多次指定)")
@@ -318,7 +316,6 @@ func serveCmd() *cobra.Command {
 
 			headerMap := parseHeaders(headers)
 			exitCfg := &config.ExitConfig{
-				RelayAddrs:          []string{"127.0.0.1" + relayListen},
 				OHTTPPrivateKeyFile: privateKeyFile,
 				AIBackend:           config.AIBackend{URL: backend, APIKey: apiKey, Headers: headerMap},
 				InsecureSkipVerify:  true,
@@ -352,7 +349,7 @@ func serveCmd() *cobra.Command {
 			log.Printf("Relay 已就绪")
 
 			// 启动 Exit (通过反向隧道连接本地 Relay)
-			e, err := exit.New(exitCfg)
+			e, err := exit.NewStatic(exitCfg, "127.0.0.1"+relayListen)
 			if err != nil {
 				return fmt.Errorf("创建 Exit 节点失败: %w", err)
 			}

@@ -16,12 +16,3 @@ dht:
 # bootstrap:
 #   url: "https://bootstrap.example.com"
 #   interval: 2m
-
-# 回退地址 (可选，DHT 发现失败时使用)
-# fallback:
-#   relay_addrs:
-#     - "relay.example.com:4433"
-#   exits:
-#     - address: "exit.example.com:8443"
-#       public_key: "BASE64_KEY"
-#       key_id: 1

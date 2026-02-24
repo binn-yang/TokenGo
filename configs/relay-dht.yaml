@@ -1,5 +1,4 @@
 listen: ":4433"
-exit: "localhost:8443"  # 回退地址
 tls:
   cert_file: "./certs/cert.pem"
   key_file: "./certs/key.pem"
@@ -13,11 +12,8 @@ dht:
     - "/dnsaddr/am6.bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb"
     - "/dnsaddr/ny5.bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa"
   listen_addrs:
-    - "/ip4/127.0.0.1/tcp/4003"
+    - "/ip4/0.0.0.0/tcp/4003"
+
   private_key_file: "./keys/relay_identity.key/identity.key"
   mode: "server"
   use_ipfs_bootstrap: false
-
-fallback:
-  exit_addrs:
-    - "localhost:8443"

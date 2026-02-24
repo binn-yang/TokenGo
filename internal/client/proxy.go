@@ -16,7 +16,6 @@ import (
 
 	"github.com/binn/tokengo/internal/bootstrap"
 	"github.com/binn/tokengo/internal/config"
-	"github.com/binn/tokengo/internal/crypto"
 	"github.com/binn/tokengo/internal/dht"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
@@ -155,7 +154,7 @@ func (p *LocalProxy) Start() error {
 	return p.server.ListenAndServe()
 }
 
-// discoverAndConnect 发现节点并连接 (DHT → Bootstrap API → Fallback)
+// discoverAndConnect 发现节点并连接 (DHT → Bootstrap API)
 // 新架构：Exit 公钥直接从 DHT/Bootstrap 获取，不再通过 Relay
 func (p *LocalProxy) discoverAndConnect(ctx context.Context) error {
 	var relayAddr string
@@ -212,32 +211,12 @@ func (p *LocalProxy) discoverAndConnect(ctx context.Context) error {
 		}
 	}
 
-	// 3. 使用回退地址
-	if relayAddr == "" && len(p.cfg.Fallback.RelayAddrs) > 0 {
-		relayAddr = p.cfg.Fallback.RelayAddrs[0]
-		log.Printf("使用回退 Relay: %s", relayAddr)
-	}
-
-	// Exit 回退：如果 DHT/Bootstrap 都没有发现 Exit，使用配置的回退 Exit
-	if exitInfo == nil && len(p.cfg.Fallback.Exits) > 0 {
-		fallbackExit := p.cfg.Fallback.Exits[0]
-		keyID, pubKey, err := crypto.LoadPublicKeyConfig(fallbackExit.PublicKey)
-		if err != nil {
-			return fmt.Errorf("解码回退 Exit 公钥失败: %w", err)
-		}
-		exitInfo = &dht.ExitNodeInfo{
-			PublicKey: pubKey,
-			KeyID:     keyID,
-		}
-		log.Printf("使用回退 Exit (KeyID: %d)", exitInfo.KeyID)
-	}
-
 	// 验证发现结果
 	if relayAddr == "" {
-		return fmt.Errorf("无法发现 Relay 节点")
+		return fmt.Errorf("无法发现 Relay 节点 (请确保 DHT 或 Bootstrap API 配置正确)")
 	}
 	if exitInfo == nil || exitInfo.PublicKey == nil {
-		return fmt.Errorf("无法发现 Exit 节点（含公钥）")
+		return fmt.Errorf("无法发现 Exit 节点（含公钥）(请确保 DHT 或 Bootstrap API 配置正确)")
 	}
 
 	// 设置 Exit（公钥已在发现时获取）

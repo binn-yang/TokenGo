@@ -20,13 +20,30 @@ type ExitNode struct {
 	tunnel       *TunnelClient
 	ohttpHandler *OHTTPHandler
 	dhtNode      *dht.Node
+	discovery    *dht.Discovery
 	provider     *dht.Provider
 	publicKey    []byte
 	keyID        uint8
+	staticRelay  string // 静态 Relay 地址（用于 serve 命令）
 }
 
-// New 创建出口节点
+// New 创建出口节点（DHT 发现模式）
 func New(cfg *config.ExitConfig) (*ExitNode, error) {
+	// DHT 必须启用以发现 Relay
+	if !cfg.DHT.Enabled {
+		return nil, fmt.Errorf("必须启用 DHT 配置以发现 Relay 节点")
+	}
+
+	return newExitNode(cfg, "")
+}
+
+// NewStatic 创建出口节点（静态地址模式，用于 serve 命令）
+func NewStatic(cfg *config.ExitConfig, relayAddr string) (*ExitNode, error) {
+	return newExitNode(cfg, relayAddr)
+}
+
+// newExitNode 内部构造函数
+func newExitNode(cfg *config.ExitConfig, staticRelay string) (*ExitNode, error) {
 	// 加载私钥
 	privKeyData, err := os.ReadFile(cfg.OHTTPPrivateKeyFile)
 	if err != nil {
@@ -63,48 +80,56 @@ func New(cfg *config.ExitConfig) (*ExitNode, error) {
 	// 计算公钥哈希 (用于在 Relay 侧标识此 Exit)
 	pubKeyHash := crypto.PubKeyHash(publicKey)
 
-	// 创建反向隧道客户端
-	tunnel := NewTunnelClient(cfg.RelayAddrs, pubKeyHash, ohttpHandler, cfg.InsecureSkipVerify)
-
 	node := &ExitNode{
-		cfg:          cfg,
-		tunnel:       tunnel,
+		cfg:         cfg,
 		ohttpHandler: ohttpHandler,
 		publicKey:    publicKey,
 		keyID:        keyID,
+		staticRelay:  staticRelay,
 	}
 
-	// 如果启用了 DHT，创建 DHT 节点
-	if cfg.DHT.Enabled {
-		dhtCfg := &dht.Config{
-			PrivateKeyPath:   cfg.DHT.PrivateKeyFile,
-			BootstrapPeers:   cfg.DHT.BootstrapPeers,
-			ListenAddrs:      cfg.DHT.ListenAddrs,
-			ExternalAddrs:    cfg.DHT.ExternalAddrs,
-			Mode:             "server",
-			ServiceType:      "exit",
-			UseIPFSBootstrap: cfg.DHT.UseIPFSBootstrap,
-		}
-
-		dhtNode, err := dht.NewNode(dhtCfg)
-		if err != nil {
-			return nil, fmt.Errorf("创建 DHT 节点失败: %w", err)
-		}
-		node.dhtNode = dhtNode
-		node.provider = dht.NewProvider(dhtNode, "exit")
+	// 静态模式（用于 serve 命令）
+	if staticRelay != "" {
+		node.tunnel = NewTunnelClientStatic(staticRelay, pubKeyHash, ohttpHandler, cfg.InsecureSkipVerify)
+		return node, nil
 	}
+
+	// DHT 发现模式
+	// 创建 DHT 节点
+	dhtCfg := &dht.Config{
+		PrivateKeyPath:   cfg.DHT.PrivateKeyFile,
+		BootstrapPeers:   cfg.DHT.BootstrapPeers,
+		ListenAddrs:      cfg.DHT.ListenAddrs,
+		ExternalAddrs:    cfg.DHT.ExternalAddrs,
+		Mode:             "server",
+		ServiceType:      "exit",
+		UseIPFSBootstrap: cfg.DHT.UseIPFSBootstrap,
+	}
+
+	dhtNode, err := dht.NewNode(dhtCfg)
+	if err != nil {
+		return nil, fmt.Errorf("创建 DHT 节点失败: %w", err)
+	}
+	node.dhtNode = dhtNode
+	node.discovery = dht.NewDiscovery(dhtNode)
+	node.provider = dht.NewProvider(dhtNode, "exit")
+
+	// 创建反向隧道客户端（传入 DHT 发现器）
+	node.tunnel = NewTunnelClient(node.discovery, pubKeyHash, ohttpHandler, cfg.InsecureSkipVerify)
 
 	return node, nil
 }
 
 // Start 启动出口节点
 func (e *ExitNode) Start() error {
-	// 启动 DHT 节点
+	ctx := context.Background()
+
+	// 1. 先启动 DHT 节点（仅 DHT 模式）
 	if e.dhtNode != nil {
-		ctx := context.Background()
 		if err := e.dhtNode.Start(ctx); err != nil {
 			return fmt.Errorf("启动 DHT 节点失败: %w", err)
 		}
+		log.Printf("DHT 节点已启动, PeerID: %s", e.dhtNode.PeerID())
 
 		// 注册服务到 DHT
 		serviceInfo := &dht.ServiceInfo{
@@ -129,14 +154,19 @@ func (e *ExitNode) Start() error {
 	log.Printf("Exit pubKeyHash: %s", pubKeyHash)
 	log.Printf("")
 	log.Printf("AI 后端: %s", e.cfg.AIBackend.URL)
-	log.Printf("Relay 地址: %v", e.cfg.RelayAddrs)
+
+	// 打印连接模式
+	if e.staticRelay != "" {
+		log.Printf("Relay 地址: %s (静态)", e.staticRelay)
+	} else {
+		log.Printf("正在通过 DHT 发现 Relay...")
+	}
 	log.Printf("")
-	log.Printf("正在通过反向隧道连接 Relay...")
 
 	// 优雅关闭
 	go e.handleShutdown()
 
-	// 启动反向隧道 (阻塞)
+	// 2. 启动反向隧道
 	return e.tunnel.Start(context.Background())
 }
 

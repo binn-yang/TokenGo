@@ -68,11 +68,11 @@ run-client: build
 
 # 运行中继节点
 run-relay: build
-	./$(BUILD_DIR)/$(BIN_NAME) relay --config configs/relay.yaml
+	./$(BUILD_DIR)/$(BIN_NAME) relay --config configs/relay-dht.yaml
 
 # 运行出口节点
 run-exit: build
-	./$(BUILD_DIR)/$(BIN_NAME) exit --config configs/exit.yaml
+	./$(BUILD_DIR)/$(BIN_NAME) exit --config configs/exit-dht.yaml
 
 # 本地测试 (启动所有组件)
 # 需要分别在不同终端运行

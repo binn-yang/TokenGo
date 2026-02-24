@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/base64"
 	"fmt"
 	"os"
 	"time"
@@ -11,12 +10,11 @@ import (
 
 // ClientConfig 客户端配置
 type ClientConfig struct {
-	Listen             string         `yaml:"listen"`
-	Timeout            time.Duration  `yaml:"timeout"`
-	InsecureSkipVerify bool           `yaml:"insecure_skip_verify"` // 仅开发环境使用
-	DHT                DHTConfig      `yaml:"dht,omitempty"`        // DHT 发现配置
-	Bootstrap          BootstrapAPI   `yaml:"bootstrap,omitempty"`  // Bootstrap API 配置
-	Fallback           FallbackConfig `yaml:"fallback,omitempty"`   // 回退地址
+	Listen             string        `yaml:"listen"`
+	Timeout            time.Duration `yaml:"timeout"`
+	InsecureSkipVerify bool          `yaml:"insecure_skip_verify"` // 仅开发环境使用
+	DHT                DHTConfig     `yaml:"dht,omitempty"`        // DHT 发现配置
+	Bootstrap          BootstrapAPI  `yaml:"bootstrap,omitempty"`  // Bootstrap API 配置
 }
 
 // BootstrapAPI Bootstrap API 配置
@@ -35,7 +33,6 @@ type RelayConfig struct {
 
 // ExitConfig 出口节点配置
 type ExitConfig struct {
-	RelayAddrs          []string  `yaml:"relay_addrs"`           // 要连接的 Relay 地址列表
 	OHTTPPrivateKeyFile string    `yaml:"ohttp_private_key_file"`
 	AIBackend           AIBackend `yaml:"ai_backend"`
 	InsecureSkipVerify  bool      `yaml:"insecure_skip_verify"` // 仅开发环境使用
@@ -64,35 +61,6 @@ type DHTConfig struct {
 	PrivateKeyFile   string   `yaml:"private_key_file"`
 	Mode             string   `yaml:"mode"` // "server" or "client"
 	UseIPFSBootstrap bool     `yaml:"use_ipfs_bootstrap,omitempty"`
-}
-
-// FallbackConfig 静态回退配置
-type FallbackConfig struct {
-	RelayAddrs []string       `yaml:"relay_addrs,omitempty"` // Relay 地址列表
-	Exits      []FallbackExit `yaml:"exits,omitempty"`       // Exit 节点列表（含公钥）
-}
-
-// FallbackExit 回退 Exit 节点配置
-type FallbackExit struct {
-	PublicKey string `yaml:"public_key"` // OHTTP 公钥 (base64 编码)
-	KeyID     uint8  `yaml:"key_id"`     // OHTTP KeyID
-}
-
-// PublicKeyBytes 从 base64 编码的 KeyConfig 中提取纯公钥字节
-func (f *FallbackExit) PublicKeyBytes() ([]byte, error) {
-	data, err := base64.StdEncoding.DecodeString(f.PublicKey)
-	if err != nil {
-		return nil, fmt.Errorf("解码公钥失败: %w", err)
-	}
-	// KeyConfig 格式: KeyID(1) + KEM_ID(2) + PubKeyLen(2) + PubKey(N) + ...
-	if len(data) < 5 {
-		return nil, fmt.Errorf("KeyConfig 数据太短")
-	}
-	pubKeyLen := int(data[3])<<8 | int(data[4])
-	if len(data) < 5+pubKeyLen {
-		return nil, fmt.Errorf("公钥数据不完整")
-	}
-	return data[5 : 5+pubKeyLen], nil
 }
 
 // BootstrapConfig Bootstrap 节点配置

@@ -6,17 +6,21 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/binn/tokengo/internal/dht"
 	"github.com/binn/tokengo/internal/protocol"
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/quic-go/quic-go"
 )
 
 // TunnelClient Exit 侧反向隧道客户端
 // Exit 主动连接 Relay，注册自己，然后接收 Relay 转发过来的请求
 type TunnelClient struct {
-	relayAddrs      []string
+	discovery       *dht.Discovery
+	staticRelayAddr string // 静态 Relay 地址（用于 serve 命令）
 	pubKeyHash      string
 	tlsConfig       *tls.Config
 	ohttpHandler    *OHTTPHandler
@@ -27,8 +31,8 @@ type TunnelClient struct {
 	activeRelayAddr string
 }
 
-// NewTunnelClient 创建反向隧道客户端
-func NewTunnelClient(relayAddrs []string, pubKeyHash string, ohttpHandler *OHTTPHandler, insecureSkipVerify bool) *TunnelClient {
+// NewTunnelClient 创建反向隧道客户端（DHT 发现模式）
+func NewTunnelClient(discovery *dht.Discovery, pubKeyHash string, ohttpHandler *OHTTPHandler, insecureSkipVerify bool) *TunnelClient {
 	tlsConfig := &tls.Config{
 		NextProtos:         []string{"tokengo-exit"},
 		InsecureSkipVerify: insecureSkipVerify,
@@ -36,12 +40,30 @@ func NewTunnelClient(relayAddrs []string, pubKeyHash string, ohttpHandler *OHTTP
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &TunnelClient{
-		relayAddrs:   relayAddrs,
+		discovery:    discovery,
 		pubKeyHash:   pubKeyHash,
 		tlsConfig:    tlsConfig,
 		ohttpHandler: ohttpHandler,
 		ctx:          ctx,
 		cancel:       cancel,
+	}
+}
+
+// NewTunnelClientStatic 创建反向隧道客户端（静态地址模式，用于 serve 命令）
+func NewTunnelClientStatic(relayAddr string, pubKeyHash string, ohttpHandler *OHTTPHandler, insecureSkipVerify bool) *TunnelClient {
+	tlsConfig := &tls.Config{
+		NextProtos:         []string{"tokengo-exit"},
+		InsecureSkipVerify: insecureSkipVerify,
+		MinVersion:         tls.VersionTLS13,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &TunnelClient{
+		staticRelayAddr: relayAddr,
+		pubKeyHash:      pubKeyHash,
+		tlsConfig:       tlsConfig,
+		ohttpHandler:    ohttpHandler,
+		ctx:             ctx,
+		cancel:          cancel,
 	}
 }
 
@@ -83,56 +105,81 @@ func (t *TunnelClient) Start(ctx context.Context) error {
 	return nil
 }
 
-// selectRelay 选择延迟最低的 Relay 节点
+// selectRelay 选择 Relay 节点（静态地址或 DHT 发现）
 func (t *TunnelClient) selectRelay(ctx context.Context) (string, error) {
-	if len(t.relayAddrs) == 0 {
-		return "", fmt.Errorf("没有可用的 Relay 地址")
+	// 静态模式（用于 serve 命令）
+	if t.staticRelayAddr != "" {
+		return t.staticRelayAddr, nil
 	}
 
-	// 只有一个地址，直接返回
-	if len(t.relayAddrs) == 1 {
-		return t.relayAddrs[0], nil
+	// DHT 发现模式
+	if t.discovery == nil {
+		return "", fmt.Errorf("DHT 未启用，无法发现 Relay 节点")
 	}
 
-	// 并发探测所有 Relay 的 RTT
-	type probeResult struct {
-		addr string
-		rtt  time.Duration
-		err  error
+	relays, err := t.discovery.DiscoverRelays(ctx)
+	if err != nil {
+		return "", fmt.Errorf("DHT 发现 Relay 失败: %w", err)
+	}
+	if len(relays) == 0 {
+		return "", fmt.Errorf("DHT 未发现任何 Relay 节点")
 	}
 
-	results := make(chan probeResult, len(t.relayAddrs))
-	probeCtx, probeCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer probeCancel()
+	log.Printf("从 DHT 发现 %d 个 Relay 节点", len(relays))
 
-	for _, addr := range t.relayAddrs {
-		go func(a string) {
-			rtt, err := t.probeRelay(probeCtx, a)
-			results <- probeResult{addr: a, rtt: rtt, err: err}
-		}(addr)
-	}
+	// 从 peer.AddrInfo 提取地址并探测 RTT
+	return t.selectBestRelay(ctx, relays)
+}
 
+// selectBestRelay 从 DHT 发现的 Relay 中选择延迟最低的
+func (t *TunnelClient) selectBestRelay(ctx context.Context, relays []peer.AddrInfo) (string, error) {
 	var bestAddr string
 	var bestRTT time.Duration
 
-	for i := 0; i < len(t.relayAddrs); i++ {
-		r := <-results
-		if r.err != nil {
-			log.Printf("探测 Relay %s 失败: %v", r.addr, r.err)
+	for _, relay := range relays {
+		addr := extractRelayAddrFromPeerInfo(relay)
+		if addr == "" {
 			continue
 		}
-		log.Printf("Relay %s RTT: %v", r.addr, r.rtt)
-		if bestAddr == "" || r.rtt < bestRTT {
-			bestAddr = r.addr
-			bestRTT = r.rtt
+
+		rtt, err := t.probeRelay(ctx, addr)
+		if err != nil {
+			log.Printf("探测 Relay %s 失败: %v", addr, err)
+			continue
+		}
+
+		log.Printf("Relay %s RTT: %v", addr, rtt)
+		if bestAddr == "" || rtt < bestRTT {
+			bestAddr = addr
+			bestRTT = rtt
 		}
 	}
 
 	if bestAddr == "" {
-		return "", fmt.Errorf("所有 Relay 地址均不可达")
+		return "", fmt.Errorf("所有 Relay 节点均不可达")
 	}
-
 	return bestAddr, nil
+}
+
+// extractRelayAddrFromPeerInfo 从 peer.AddrInfo 提取 host:port
+func extractRelayAddrFromPeerInfo(info peer.AddrInfo) string {
+	for _, addr := range info.Addrs {
+		addrStr := addr.String()
+		parts := strings.Split(addrStr, "/")
+		var ip, port string
+		for i := 0; i < len(parts)-1; i++ {
+			if parts[i] == "ip4" || parts[i] == "ip6" {
+				ip = parts[i+1]
+			}
+			if parts[i] == "tcp" || parts[i] == "udp" {
+				port = parts[i+1]
+			}
+		}
+		if ip != "" && port != "" {
+			return fmt.Sprintf("%s:%s", ip, port)
+		}
+	}
+	return ""
 }
 
 // probeRelay 探测 Relay 的 RTT (QUIC 握手时间)

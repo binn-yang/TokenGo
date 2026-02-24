@@ -22,17 +22,16 @@ import (
 
 // Client 客户端核心逻辑
 type Client struct {
-	relayAddr          string
-	exitPubKeyHash     string // Exit 公钥哈希 (由 Client 指定，Relay 盲转发)
-	ohttpClient        *crypto.OHTTPClient
-	conn               quic.Connection
-	connMu             sync.Mutex
-	tlsConfig          *tls.Config
-	dhtNode            *dht.Node
-	discovery          *dht.Discovery
-	selector           loadbalancer.Selector
-	fallbackRelayAddrs []string
-	currentRelayID     peer.ID
+	relayAddr      string
+	exitPubKeyHash string // Exit 公钥哈希 (由 Client 指定，Relay 盲转发)
+	ohttpClient    *crypto.OHTTPClient
+	conn           quic.Connection
+	connMu         sync.Mutex
+	tlsConfig      *tls.Config
+	dhtNode        *dht.Node
+	discovery      *dht.Discovery
+	selector       loadbalancer.Selector
+	currentRelayID peer.ID
 }
 
 // NewClient 创建客户端 (静态模式)
@@ -71,30 +70,6 @@ func NewClientDynamic(insecureSkipVerify bool) (*Client, error) {
 	}, nil
 }
 
-// NewClientWithDiscovery 创建支持 DHT 发现的客户端
-func NewClientWithDiscovery(dhtNode *dht.Node, keyID uint8, exitPublicKey []byte, insecureSkipVerify bool, fallbackAddrs []string) (*Client, error) {
-	ohttpClient, err := crypto.NewOHTTPClient(keyID, exitPublicKey)
-	if err != nil {
-		return nil, fmt.Errorf("创建 OHTTP 客户端失败: %w", err)
-	}
-
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: insecureSkipVerify,
-		NextProtos:         []string{"tokengo-relay"},
-		MinVersion:         tls.VersionTLS13,
-	}
-
-	return &Client{
-		exitPubKeyHash:     crypto.PubKeyHash(exitPublicKey),
-		ohttpClient:        ohttpClient,
-		tlsConfig:          tlsConfig,
-		dhtNode:            dhtNode,
-		discovery:          dht.NewDiscovery(dhtNode),
-		selector:           loadbalancer.NewWeightedSelector(),
-		fallbackRelayAddrs: fallbackAddrs,
-	}, nil
-}
-
 // connect 连接到 Relay 节点
 func (c *Client) connect(ctx context.Context) error {
 	// 关闭旧连接（如果存在）
@@ -114,11 +89,13 @@ func (c *Client) connect(ctx context.Context) error {
 
 // connectWithDiscovery 使用 DHT 发现连接
 func (c *Client) connectWithDiscovery(ctx context.Context) error {
-	// 尝试从 DHT 发现 Relay 节点
+	// 从 DHT 发现 Relay 节点
 	relays, err := c.discovery.DiscoverRelays(ctx)
-	if err != nil || len(relays) == 0 {
-		log.Printf("DHT 发现 Relay 失败，使用回退地址")
-		return c.connectWithFallback(ctx)
+	if err != nil {
+		return fmt.Errorf("DHT 发现 Relay 失败: %w", err)
+	}
+	if len(relays) == 0 {
+		return fmt.Errorf("DHT 未发现任何 Relay 节点")
 	}
 
 	log.Printf("从 DHT 发现 %d 个 Relay 节点", len(relays))
@@ -126,37 +103,25 @@ func (c *Client) connectWithDiscovery(ctx context.Context) error {
 	// 选择一个 Relay 节点
 	selected, err := c.selector.Select(ctx, relays)
 	if err != nil {
-		return c.connectWithFallback(ctx)
+		return fmt.Errorf("选择 Relay 失败: %w", err)
 	}
 
 	// 提取地址
 	relayAddr := extractRelayAddress(selected.Addrs)
 	if relayAddr == "" {
 		c.selector.ReportFailure(selected.ID)
-		return c.connectWithFallback(ctx)
+		return fmt.Errorf("无法提取 Relay 地址")
 	}
 
 	// 尝试连接
 	if err := c.connectToAddr(ctx, relayAddr, selected.ID); err != nil {
 		c.selector.ReportFailure(selected.ID)
-		return c.connectWithFallback(ctx)
+		return fmt.Errorf("连接 Relay 失败: %w", err)
 	}
 
 	c.selector.ReportSuccess(selected.ID)
 	c.currentRelayID = selected.ID
 	return nil
-}
-
-// connectWithFallback 使用回退地址连接
-func (c *Client) connectWithFallback(ctx context.Context) error {
-	for _, addr := range c.fallbackRelayAddrs {
-		if err := c.connectToAddr(ctx, addr, peer.ID("")); err == nil {
-			log.Printf("已连接到回退 Relay: %s", addr)
-			return nil
-		}
-		log.Printf("回退地址 %s 连接失败", addr)
-	}
-	return fmt.Errorf("所有 Relay 地址均不可用")
 }
 
 // connectToAddr 连接到指定地址

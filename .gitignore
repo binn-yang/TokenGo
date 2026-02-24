@@ -25,6 +25,9 @@ Thumbs.db
 *.out
 coverage.html
 
+# Local config overrides (contain secrets)
+configs/*.local.yaml
+
 # Temporary files
 *.tmp
 *.log
