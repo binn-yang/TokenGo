@@ -2,9 +2,7 @@ package dht
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"sync"
 	"time"
@@ -23,13 +21,6 @@ const (
 	MaxDiscoveryCount = 20
 )
 
-// ExitNodeInfo Exit 节点信息（含公钥）
-type ExitNodeInfo struct {
-	peer.AddrInfo
-	PublicKey []byte // OHTTP 公钥
-	KeyID     uint8  // OHTTP KeyID
-}
-
 // Discovery 服务发现器
 type Discovery struct {
 	node  *Node
@@ -41,13 +32,11 @@ type Discovery struct {
 
 // serviceCache 服务缓存
 type serviceCache struct {
-	mu            sync.RWMutex
-	relays        []peer.AddrInfo
-	exits         []peer.AddrInfo
-	exitsWithKeys []ExitNodeInfo // Exit 节点（含公钥）
-	relayTTL      time.Time
-	exitTTL       time.Time
-	exitKeysTTL   time.Time
+	mu       sync.RWMutex
+	relays   []peer.AddrInfo
+	exits    []peer.AddrInfo
+	relayTTL time.Time
+	exitTTL  time.Time
 }
 
 // NewDiscovery 创建服务发现器
@@ -215,91 +204,6 @@ func (d *Discovery) DiscoverExits(ctx context.Context) ([]peer.AddrInfo, error) 
 	d.cache.mu.Unlock()
 
 	return peers, nil
-}
-
-// DiscoverExitsWithKeys 发现 Exit 节点并通过 libp2p stream 获取公钥
-func (d *Discovery) DiscoverExitsWithKeys(ctx context.Context) ([]ExitNodeInfo, error) {
-	// 检查缓存
-	d.cache.mu.RLock()
-	if time.Now().Before(d.cache.exitKeysTTL) && len(d.cache.exitsWithKeys) > 0 {
-		exits := make([]ExitNodeInfo, len(d.cache.exitsWithKeys))
-		copy(exits, d.cache.exitsWithKeys)
-		d.cache.mu.RUnlock()
-		return exits, nil
-	}
-	d.cache.mu.RUnlock()
-
-	// 发现 Exit 节点
-	peers, err := d.findProviders(ctx, ExitServiceNamespace)
-	if err != nil {
-		return nil, err
-	}
-
-	// 通过 stream 获取每个 Exit 的公钥
-	var exits []ExitNodeInfo
-	for _, p := range peers {
-		keyInfo, err := d.fetchPubKeyViaStream(ctx, p)
-		if err != nil {
-			log.Printf("警告: 通过 stream 获取 Exit %s 公钥失败: %v", p.ID, err)
-			continue
-		}
-
-		exits = append(exits, ExitNodeInfo{
-			AddrInfo:  p,
-			PublicKey: keyInfo.PublicKey,
-			KeyID:     keyInfo.KeyID,
-		})
-	}
-
-	// 更新缓存
-	d.cache.mu.Lock()
-	d.cache.exitsWithKeys = exits
-	d.cache.exitKeysTTL = time.Now().Add(CacheRefreshInterval)
-	d.cache.mu.Unlock()
-
-	if len(exits) > 0 {
-		log.Printf("发现 %d 个 Exit 节点（含公钥）", len(exits))
-	}
-
-	return exits, nil
-}
-
-// fetchPubKeyViaStream 通过 libp2p stream 直接从 Exit 获取 OHTTP 公钥
-func (d *Discovery) fetchPubKeyViaStream(ctx context.Context, peerInfo peer.AddrInfo) (*ExitKeyInfo, error) {
-	// 先连接到 Exit peer
-	if err := d.node.Host().Connect(ctx, peerInfo); err != nil {
-		return nil, fmt.Errorf("连接 Exit peer 失败: %w", err)
-	}
-
-	// 打开 pubkey stream
-	s, err := d.node.Host().NewStream(ctx, peerInfo.ID, PubKeyProtocol)
-	if err != nil {
-		return nil, fmt.Errorf("打开 pubkey stream 失败: %w", err)
-	}
-	defer s.Close()
-
-	// 读取响应
-	data, err := io.ReadAll(io.LimitReader(s, 4096))
-	if err != nil {
-		return nil, fmt.Errorf("读取公钥数据失败: %w", err)
-	}
-
-	var keyInfo ExitKeyInfo
-	if err := json.Unmarshal(data, &keyInfo); err != nil {
-		return nil, fmt.Errorf("解析公钥数据失败: %w", err)
-	}
-
-	return &keyInfo, nil
-}
-
-// GetCachedExitsWithKeys 获取缓存的 Exit 节点（含公钥）
-func (d *Discovery) GetCachedExitsWithKeys() []ExitNodeInfo {
-	d.cache.mu.RLock()
-	defer d.cache.mu.RUnlock()
-
-	exits := make([]ExitNodeInfo, len(d.cache.exitsWithKeys))
-	copy(exits, d.cache.exitsWithKeys)
-	return exits
 }
 
 // GetCachedRelays 获取缓存的 Relay 节点

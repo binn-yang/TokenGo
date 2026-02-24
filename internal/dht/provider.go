@@ -2,16 +2,13 @@ package dht
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
 	"time"
 
 	"github.com/ipfs/go-cid"
-	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/multiformats/go-multihash"
 )
 
@@ -20,18 +17,9 @@ const (
 	RelayServiceNamespace = "/tokengo/relay/v1"
 	ExitServiceNamespace  = "/tokengo/exit/v1"
 
-	// libp2p stream 协议：用于 Client 直接从 Exit 获取 OHTTP 公钥
-	PubKeyProtocol = protocol.ID("/tokengo/pubkey/1.0.0")
-
 	// Provider 刷新间隔
 	ProviderRefreshInterval = 3 * time.Minute
 )
-
-// ExitKeyInfo Exit 节点公钥信息（存储在 DHT 中）
-type ExitKeyInfo struct {
-	KeyID     uint8  `json:"key_id"`
-	PublicKey []byte `json:"public_key"`
-}
 
 // ServiceInfo 服务信息
 type ServiceInfo struct {
@@ -125,12 +113,6 @@ func (p *Provider) Register(info *ServiceInfo) error {
 		return fmt.Errorf("注册服务失败（重试 %d 次）: %w", maxRetries, lastErr)
 	}
 
-	// Exit 节点：注册公钥 stream handler
-	if info.PublicKey != nil && len(info.PublicKey) > 0 {
-		p.registerPubKeyHandler()
-		log.Printf("已注册 Exit 公钥 stream handler: %s", PubKeyProtocol)
-	}
-
 	p.mu.Lock()
 	p.registered = true
 	p.mu.Unlock()
@@ -151,35 +133,6 @@ func (p *Provider) createServiceCID() (cid.Cid, error) {
 		return cid.Cid{}, err
 	}
 	return cid.NewCidV1(cid.Raw, hash), nil
-}
-
-// registerPubKeyHandler 注册 libp2p stream handler，供 Client 直接获取 OHTTP 公钥
-func (p *Provider) registerPubKeyHandler() {
-	p.node.Host().SetStreamHandler(PubKeyProtocol, func(s network.Stream) {
-		defer s.Close()
-
-		p.mu.RLock()
-		info := p.serviceInfo
-		p.mu.RUnlock()
-
-		if info == nil || info.PublicKey == nil {
-			return
-		}
-
-		keyInfo := ExitKeyInfo{
-			KeyID:     info.KeyID,
-			PublicKey: info.PublicKey,
-		}
-		data, err := json.Marshal(keyInfo)
-		if err != nil {
-			log.Printf("警告: 序列化公钥信息失败: %v", err)
-			return
-		}
-
-		if _, err := s.Write(data); err != nil {
-			log.Printf("警告: 发送公钥失败: %v", err)
-		}
-	})
 }
 
 // refreshLoop 定期刷新 Provider 记录
