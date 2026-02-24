@@ -110,7 +110,8 @@ func (n *Node) Start(ctx context.Context) error {
 	} else {
 		dhtOpts = append(dhtOpts, dht.Mode(dht.ModeClient))
 	}
-	dhtOpts = append(dhtOpts, dht.ProtocolPrefix("/tokengo"))
+	// 注意: 不设置自定义 ProtocolPrefix，使用标准 IPFS DHT 协议 (/ipfs/kad/1.0.0)
+	// 这样才能与公共 IPFS bootstrap 节点交互并填充路由表
 
 	// 创建 libp2p Host
 	var kdht *dht.IpfsDHT
@@ -163,6 +164,11 @@ func (n *Node) Start(ctx context.Context) error {
 	if err := n.dht.Bootstrap(ctx); err != nil {
 		return fmt.Errorf("Bootstrap DHT 失败: %w", err)
 	}
+
+	// 等待路由表填充
+	log.Printf("等待 DHT 路由表填充...")
+	time.Sleep(5 * time.Second)
+	log.Printf("DHT 路由表大小: %d", n.dht.RoutingTable().Size())
 
 	n.started = true
 	log.Printf("DHT 节点已启动, PeerID: %s", n.identity.PeerID)

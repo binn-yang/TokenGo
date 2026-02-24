@@ -76,12 +76,11 @@ func NewProvider(node *Node, serviceType string) *Provider {
 	}
 }
 
-// Register 注册服务到 DHT
+// Register 注册服务到 DHT（带重试）
 func (p *Provider) Register(info *ServiceInfo) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	p.serviceInfo = info
+	p.mu.Unlock()
 
 	// 创建服务 CID
 	c, err := p.createServiceCID()
@@ -89,9 +88,39 @@ func (p *Provider) Register(info *ServiceInfo) error {
 		return fmt.Errorf("创建服务 CID 失败: %w", err)
 	}
 
-	// 提供服务
-	if err := p.node.DHT().Provide(p.ctx, c, true); err != nil {
-		return fmt.Errorf("注册服务失败: %w", err)
+	// 带重试的注册（等待 DHT 路由表填充）
+	backoff := 3 * time.Second
+	const maxBackoff = 30 * time.Second
+	const maxRetries = 5
+
+	var lastErr error
+	for i := 0; i < maxRetries; i++ {
+		if i > 0 {
+			log.Printf("DHT 注册重试 (%d/%d)，等待 %v...", i+1, maxRetries, backoff)
+			select {
+			case <-time.After(backoff):
+			case <-p.ctx.Done():
+				return fmt.Errorf("服务已停止")
+			}
+			backoff = time.Duration(float64(backoff) * 2)
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+
+		if err := p.node.DHT().Provide(p.ctx, c, true); err != nil {
+			lastErr = err
+			log.Printf("DHT Provide 失败: %v", err)
+			continue
+		}
+
+		// 注册成功
+		lastErr = nil
+		break
+	}
+
+	if lastErr != nil {
+		return fmt.Errorf("注册服务失败（重试 %d 次）: %w", maxRetries, lastErr)
 	}
 
 	// Exit 节点：存储公钥到 DHT
@@ -103,7 +132,9 @@ func (p *Provider) Register(info *ServiceInfo) error {
 		}
 	}
 
+	p.mu.Lock()
 	p.registered = true
+	p.mu.Unlock()
 	log.Printf("已注册服务到 DHT: %s (PeerID: %s)", p.namespace, p.node.PeerID())
 
 	// 启动心跳刷新
