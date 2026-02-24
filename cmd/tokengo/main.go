@@ -360,8 +360,13 @@ func serveCmd() *cobra.Command {
 				}
 			}()
 
-			// 等待 Exit 隧道建立（Exit 尚未实现 Ready，使用较短的超时）
-			time.Sleep(100 * time.Millisecond)
+			// 等待 Exit 隧道建立
+			select {
+			case <-e.Ready():
+				log.Printf("Exit 已就绪")
+			case <-time.After(5 * time.Second):
+				return fmt.Errorf("Exit 启动超时")
+			}
 
 			// 启动 Client (静态模式)
 			proxy, err := client.NewStaticProxy(
