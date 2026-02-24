@@ -30,8 +30,6 @@ COPY --from=builder /app/tokengo /usr/local/bin/
 
 # Copy configuration files
 COPY --from=builder /app/configs /etc/tokengo/configs
-COPY --from=builder /app/certs /etc/tokengo/certs
-COPY --from=builder /app/keys /etc/tokengo/keys
 
 WORKDIR /etc/tokengo
 

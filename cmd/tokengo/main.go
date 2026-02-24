@@ -274,6 +274,7 @@ Exit 节点主动连接 Relay（无需公网 IP），通过 QUIC 反向隧道接
 func serveCmd() *cobra.Command {
 	var listen, backend, apiKey string
 	var headers []string
+	var insecure bool
 
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -318,13 +319,13 @@ func serveCmd() *cobra.Command {
 			exitCfg := &config.ExitConfig{
 				OHTTPPrivateKeyFile: privateKeyFile,
 				AIBackend:           config.AIBackend{URL: backend, APIKey: apiKey, Headers: headerMap},
-				InsecureSkipVerify:  true,
+				InsecureSkipVerify:  insecure,
 			}
 
 			relayCfg := &config.RelayConfig{
 				Listen:             relayListen,
 				TLS:                config.TLSConfig{CertFile: certFile, KeyFile: keyFile},
-				InsecureSkipVerify: true,
+				InsecureSkipVerify: insecure,
 			}
 
 			// 解析 Exit 公钥
@@ -368,7 +369,7 @@ func serveCmd() *cobra.Command {
 				"127.0.0.1"+relayListen,
 				keyID,
 				publicKey,
-				true, // insecureSkipVerify
+				insecure,
 			)
 			if err != nil {
 				return fmt.Errorf("创建 Client 失败: %w", err)
@@ -402,6 +403,7 @@ func serveCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&backend, "backend", "b", "", "AI 后端地址 (必需)")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "AI 后端 API Key")
 	cmd.Flags().StringArrayVar(&headers, "header", nil, "自定义后端请求头 (格式: Key:Value，可多次指定)")
+	cmd.Flags().BoolVar(&insecure, "insecure", false, "跳过 TLS 证书验证 (使用自签名证书时需要)")
 
 	return cmd
 }
@@ -624,7 +626,7 @@ func ensureCerts(certFile, keyFile string) error {
 
 // generateRSAKey 生成 RSA 私钥
 func generateRSAKey() (*rsa.PrivateKey, error) {
-	return rsa.GenerateKey(rand.Reader, 2048)
+	return rsa.GenerateKey(rand.Reader, 4096)
 }
 
 // generateSelfSignedCert 生成自签名证书

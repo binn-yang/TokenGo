@@ -3,7 +3,7 @@
 
 listen: "127.0.0.1:8080"
 timeout: 30s
-insecure_skip_verify: true  # 仅开发环境
+insecure_skip_verify: false
 
 # DHT 配置 (默认启用公共 IPFS Bootstrap)
 dht:

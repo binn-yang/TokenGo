@@ -5,8 +5,6 @@ ai_backend:
 tls:
   cert_file: "./certs/cert.pem"
   key_file: "./certs/key.pem"
-insecure_skip_verify: true
-
 # DHT 配置 (必需 - 用于发现 Relay 节点)
 dht:
   enabled: true

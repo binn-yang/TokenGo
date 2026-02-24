@@ -2,4 +2,4 @@ listen: "0.0.0.0:8080"  # Bind to all interfaces for Docker
 relay: "relay:4433"     # Docker service name
 exit_public_key: "tgAgACDNynKdrOL0BVm64ZL1ipQENBIHlM+Du0tuDe6CkokBBgAEAAEAAQ=="
 timeout: 30s
-insecure_skip_verify: true
+insecure_skip_verify: false

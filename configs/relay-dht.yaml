@@ -2,8 +2,6 @@ listen: ":4433"
 tls:
   cert_file: "./certs/cert.pem"
   key_file: "./certs/key.pem"
-insecure_skip_verify: true
-
 dht:
   enabled: true
   bootstrap_peers:

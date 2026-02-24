@@ -27,6 +27,9 @@ services:
     depends_on:
       ollama:
         condition: service_healthy
+    volumes:
+      - ./keys:/etc/tokengo/keys:ro
+      - ./certs:/etc/tokengo/certs:ro
     ports:
       - "8443:8443"
     networks:
@@ -40,6 +43,8 @@ services:
     command: relay --config /etc/tokengo/configs/docker/relay.yaml
     depends_on:
       - exit
+    volumes:
+      - ./certs:/etc/tokengo/certs:ro
     ports:
       - "4433:4433"
     networks:
