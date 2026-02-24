@@ -79,9 +79,21 @@ type FallbackExit struct {
 	KeyID     uint8  `yaml:"key_id"`     // OHTTP KeyID
 }
 
-// PublicKeyBytes 解码 base64 编码的公钥
+// PublicKeyBytes 从 base64 编码的 KeyConfig 中提取纯公钥字节
 func (f *FallbackExit) PublicKeyBytes() ([]byte, error) {
-	return base64.StdEncoding.DecodeString(f.PublicKey)
+	data, err := base64.StdEncoding.DecodeString(f.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("解码公钥失败: %w", err)
+	}
+	// KeyConfig 格式: KeyID(1) + KEM_ID(2) + PubKeyLen(2) + PubKey(N) + ...
+	if len(data) < 5 {
+		return nil, fmt.Errorf("KeyConfig 数据太短")
+	}
+	pubKeyLen := int(data[3])<<8 | int(data[4])
+	if len(data) < 5+pubKeyLen {
+		return nil, fmt.Errorf("公钥数据不完整")
+	}
+	return data[5 : 5+pubKeyLen], nil
 }
 
 // BootstrapConfig Bootstrap 节点配置

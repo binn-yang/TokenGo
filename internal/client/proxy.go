@@ -16,6 +16,7 @@ import (
 
 	"github.com/binn/tokengo/internal/bootstrap"
 	"github.com/binn/tokengo/internal/config"
+	"github.com/binn/tokengo/internal/crypto"
 	"github.com/binn/tokengo/internal/dht"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
@@ -221,13 +222,13 @@ func (p *LocalProxy) discoverAndConnect(ctx context.Context) error {
 	// Exit 回退：如果 DHT/Bootstrap 都没有发现 Exit，使用配置的回退 Exit
 	if exitInfo == nil && len(p.cfg.Fallback.Exits) > 0 {
 		fallbackExit := p.cfg.Fallback.Exits[0]
-		pubKeyBytes, err := fallbackExit.PublicKeyBytes()
+		keyID, pubKey, err := crypto.LoadPublicKeyConfig(fallbackExit.PublicKey)
 		if err != nil {
 			return fmt.Errorf("解码回退 Exit 公钥失败: %w", err)
 		}
 		exitInfo = &dht.ExitNodeInfo{
-			PublicKey: pubKeyBytes,
-			KeyID:     fallbackExit.KeyID,
+			PublicKey: pubKey,
+			KeyID:     keyID,
 			Address:   fallbackExit.Address,
 		}
 		log.Printf("使用回退 Exit: %s", exitInfo.Address)

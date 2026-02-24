@@ -8,7 +8,10 @@ insecure_skip_verify: true
 dht:
   enabled: true
   bootstrap_peers:
-    - "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWRYkW2evPuvMRrQs3xKXW4UufuW41zz23tgU8G8NvMShj"
+    - "/dnsaddr/sg1.bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt"
+    - "/dnsaddr/sv15.bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN"
+    - "/dnsaddr/am6.bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb"
+    - "/dnsaddr/ny5.bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa"
   listen_addrs:
     - "/ip4/127.0.0.1/tcp/4003"
   private_key_file: "./keys/relay_identity.key/identity.key"

@@ -7,11 +7,18 @@ insecure_skip_verify: true
 dht:
   enabled: true
   bootstrap_peers:
-    - "/ip4/127.0.0.1/tcp/4001/p2p/<BOOTSTRAP_PEER_ID>"
-  private_key_file: "./keys/client_identity.key"
+    - "/dnsaddr/sg1.bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt"
+    - "/dnsaddr/sv15.bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN"
+    - "/dnsaddr/am6.bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb"
+    - "/dnsaddr/ny5.bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa"
+  private_key_file: "./keys/client_identity.key/identity.key"
   mode: "client"
-  use_ipfs_bootstrap: true
+  use_ipfs_bootstrap: false
 
 fallback:
   relay_addrs:
-    - "localhost:4433"
+    - "43.156.60.67:4433"
+  exits:
+    - address: "43.156.60.67:8443"
+      public_key: "7gAgACD5pFTXLvt1cdGFCemts0xsIrkryPnEM2+3KhZWO3oTegAEAAEAAQ=="
+      key_id: 238

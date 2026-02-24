@@ -6,5 +6,5 @@ fallback:
     - "43.156.60.67:4433"
   exits:
     - address: "43.156.60.67:8443"
-      public_key: "R671Dd2FaChcefha2jINUot+vyLTZD17SrAK5x+HRW4="
-      key_id: 127
+      public_key: "egAgACCZ1hcTVASqu95qJ27gvc/Ga0GnXAILcujLsj9ShLXEGgAEAAEAAQ=="
+      key_id: 122
