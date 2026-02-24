@@ -69,20 +69,49 @@ func NewTunnelClientStatic(relayAddr string, pubKeyHash string, ohttpHandler *OH
 
 // Start 启动反向隧道
 func (t *TunnelClient) Start(ctx context.Context) error {
-	// 1. 选择最佳 Relay
-	addr, err := t.selectRelay(ctx)
-	if err != nil {
-		return fmt.Errorf("选择 Relay 失败: %w", err)
-	}
-	log.Printf("选择 Relay: %s", addr)
+	// 1. 带重试的初始连接
+	backoff := 3 * time.Second
+	const maxBackoff = 60 * time.Second
 
-	// 2. 连接并注册
-	if err := t.connectAndRegister(ctx, addr); err != nil {
-		return fmt.Errorf("连接 Relay 失败: %w", err)
-	}
-	log.Printf("已注册到 Relay %s (pubKeyHash=%s)", addr, t.pubKeyHash)
+	for {
+		select {
+		case <-t.ctx.Done():
+			return fmt.Errorf("隧道已停止")
+		default:
+		}
 
-	// 3. 启动心跳和流接收 goroutine
+		// 选择最佳 Relay
+		addr, err := t.selectRelay(ctx)
+		if err != nil {
+			log.Printf("选择 Relay 失败: %v，%v 后重试...", err, backoff)
+			select {
+			case <-time.After(backoff):
+				backoff = nextBackoff(backoff, maxBackoff)
+				continue
+			case <-t.ctx.Done():
+				return fmt.Errorf("隧道已停止")
+			}
+		}
+
+		log.Printf("选择 Relay: %s", addr)
+
+		// 连接并注册
+		if err := t.connectAndRegister(ctx, addr); err != nil {
+			log.Printf("连接 Relay %s 失败: %v，%v 后重试...", addr, err, backoff)
+			select {
+			case <-time.After(backoff):
+				backoff = nextBackoff(backoff, maxBackoff)
+				continue
+			case <-t.ctx.Done():
+				return fmt.Errorf("隧道已停止")
+			}
+		}
+
+		log.Printf("已注册到 Relay %s (pubKeyHash=%s)", addr, t.pubKeyHash)
+		break
+	}
+
+	// 2. 启动心跳和流接收 goroutine
 	// 在锁保护下捕获 conn 值，避免数据竞争
 	t.connMu.Lock()
 	conn := t.conn
@@ -100,7 +129,7 @@ func (t *TunnelClient) Start(ctx context.Context) error {
 	go t.heartbeatLoop(connCtx)
 	go t.acceptStreams(connCtx, conn)
 
-	// 4. 启动重连循环 (阻塞)
+	// 3. 启动重连循环 (阻塞)
 	t.reconnectLoop(ctx)
 	return nil
 }
