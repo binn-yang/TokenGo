@@ -124,8 +124,19 @@ func (c *Client) connectWithDiscovery(ctx context.Context) error {
 	return nil
 }
 
+// SetDiscovery 设置 Discovery 实例（供 proxy 持久化 discovery 到 Client）
+func (c *Client) SetDiscovery(d *dht.Discovery) {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	c.discovery = d
+}
+
 // connectToAddr 连接到指定地址
 func (c *Client) connectToAddr(ctx context.Context, addr string, peerID peer.ID) error {
+	if addr == "" {
+		return fmt.Errorf("Relay 地址为空")
+	}
+
 	quicConfig := &quic.Config{
 		MaxIdleTimeout:  120_000_000_000, // 120 秒
 		KeepAlivePeriod: 30_000_000_000,  // 30 秒

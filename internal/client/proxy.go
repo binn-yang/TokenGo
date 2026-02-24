@@ -17,7 +17,6 @@ import (
 	"github.com/binn/tokengo/internal/bootstrap"
 	"github.com/binn/tokengo/internal/config"
 	"github.com/binn/tokengo/internal/dht"
-	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 // LocalProxy 本地 HTTP 代理服务器
@@ -26,6 +25,7 @@ type LocalProxy struct {
 	client          *Client
 	server          *http.Server
 	dhtNode         *dht.Node
+	discovery       *dht.Discovery
 	bootstrapClient *bootstrap.Client
 }
 
@@ -157,64 +157,16 @@ func (p *LocalProxy) Start() error {
 // discoverAndConnect 发现节点并连接 (DHT → Bootstrap API)
 // 新架构：Exit 公钥直接从 DHT/Bootstrap 获取，不再通过 Relay
 func (p *LocalProxy) discoverAndConnect(ctx context.Context) error {
-	var relayAddr string
-	var exitInfo *dht.ExitNodeInfo
-
-	// 1. 尝试 DHT 发现（Relay + Exit 含公钥）
+	// 1. 创建 Discovery 并持久化（重连时 Client 自动走 connectWithDiscovery）
 	if p.dhtNode != nil {
-		discovery := dht.NewDiscovery(p.dhtNode)
-
-		// 发现 Relay
-		relays, err := discovery.DiscoverRelays(ctx)
-		if err == nil && len(relays) > 0 {
-			addr := extractRelayAddrFromPeerInfo(relays[0])
-			if addr != "" {
-				relayAddr = addr
-				log.Printf("DHT 发现 Relay: %s", relayAddr)
-			}
-		} else {
-			log.Printf("DHT 发现 Relay 失败: %v", err)
-		}
-
-		// 发现 Exit（含公钥）
-		exits, err := discovery.DiscoverExitsWithKeys(ctx)
-		if err == nil && len(exits) > 0 {
-			exitInfo = &exits[0]
-			log.Printf("DHT 发现 Exit (含公钥, KeyID: %d)", exitInfo.KeyID)
-		} else {
-			log.Printf("DHT 发现 Exit 失败: %v", err)
-		}
+		p.discovery = dht.NewDiscovery(p.dhtNode)
+		p.discovery.Start()
+		p.client.SetDiscovery(p.discovery)
+		log.Println("DHT Discovery 已持久化到 Client")
 	}
 
-	// 2. 尝试 Bootstrap API（Relay + Exit 含公钥）
-	if p.bootstrapClient != nil {
-		// 发现 Relay
-		if relayAddr == "" {
-			relays, err := p.bootstrapClient.DiscoverRelays(ctx)
-			if err == nil && len(relays) > 0 {
-				relayAddr = relays[0].Address
-				log.Printf("Bootstrap API 发现 Relay: %s", relayAddr)
-			} else {
-				log.Printf("Bootstrap API 发现 Relay 失败: %v", err)
-			}
-		}
-
-		// 发现 Exit（含公钥）
-		if exitInfo == nil {
-			exits := p.bootstrapClient.GetExits()
-			if len(exits) > 0 && exits[0].PublicKey != nil {
-				exitInfo = &dht.ExitNodeInfo{
-					PublicKey: exits[0].PublicKey,
-				}
-				log.Printf("Bootstrap API 发现 Exit (含公钥)")
-			}
-		}
-	}
-
-	// 验证发现结果
-	if relayAddr == "" {
-		return fmt.Errorf("无法发现 Relay 节点 (请确保 DHT 或 Bootstrap API 配置正确)")
-	}
+	// 2. 发现 Exit 公钥 (DHT → Bootstrap)
+	exitInfo := p.discoverExit(ctx)
 	if exitInfo == nil || exitInfo.PublicKey == nil {
 		return fmt.Errorf("无法发现 Exit 节点（含公钥）(请确保 DHT 或 Bootstrap API 配置正确)")
 	}
@@ -225,48 +177,39 @@ func (p *LocalProxy) discoverAndConnect(ctx context.Context) error {
 	}
 	log.Printf("已选择 Exit 公钥哈希: %s", p.client.GetExitPubKeyHash())
 
-	// 设置 Relay 并连接
-	p.client.SetRelay(relayAddr)
+	// 3. 连接 Relay（Client 内部走 connectWithDiscovery）
 	if err := p.client.Connect(ctx); err != nil {
 		return fmt.Errorf("连接 Relay 失败: %w", err)
 	}
-	log.Printf("已连接到 Relay: %s", relayAddr)
+	log.Printf("已连接到 Relay: %s", p.client.GetRelayAddr())
 
 	return nil
 }
 
-// extractRelayAddrFromPeerInfo 从 peer.AddrInfo 提取 host:port 地址
-// 优先返回 UDP 地址（QUIC 服务运行在 UDP 上），TCP 地址仅作为回退
-func extractRelayAddrFromPeerInfo(info peer.AddrInfo) string {
-	var fallbackAddr string
-
-	for _, addr := range info.Addrs {
-		addrStr := addr.String()
-		parts := strings.Split(addrStr, "/")
-		var ip, port string
-		var isUDP bool
-		for i := 0; i < len(parts)-1; i++ {
-			if parts[i] == "ip4" || parts[i] == "ip6" {
-				ip = parts[i+1]
-			}
-			if parts[i] == "udp" {
-				port = parts[i+1]
-				isUDP = true
-			} else if parts[i] == "tcp" {
-				port = parts[i+1]
-			}
+// discoverExit 发现 Exit 节点（含公钥）(DHT → Bootstrap API)
+func (p *LocalProxy) discoverExit(ctx context.Context) *dht.ExitNodeInfo {
+	// DHT 发现 Exit（含公钥）
+	if p.discovery != nil {
+		exits, err := p.discovery.DiscoverExitsWithKeys(ctx)
+		if err == nil && len(exits) > 0 {
+			log.Printf("DHT 发现 Exit (含公钥, KeyID: %d)", exits[0].KeyID)
+			return &exits[0]
 		}
-		if ip != "" && port != "" {
-			result := fmt.Sprintf("%s:%s", ip, port)
-			if isUDP {
-				return result // UDP 优先，直接返回
-			}
-			if fallbackAddr == "" {
-				fallbackAddr = result
+		log.Printf("DHT 发现 Exit 失败: %v", err)
+	}
+
+	// Bootstrap API 发现 Exit（含公钥）
+	if p.bootstrapClient != nil {
+		exits := p.bootstrapClient.GetExits()
+		if len(exits) > 0 && exits[0].PublicKey != nil {
+			log.Printf("Bootstrap API 发现 Exit (含公钥)")
+			return &dht.ExitNodeInfo{
+				PublicKey: exits[0].PublicKey,
 			}
 		}
 	}
-	return fallbackAddr
+
+	return nil
 }
 
 // handleRequest 统一请求处理 (协议无关)
@@ -426,6 +369,11 @@ func (p *LocalProxy) handleShutdown() {
 
 // Stop 停止代理服务器
 func (p *LocalProxy) Stop() error {
+	// 停止 Discovery（在关闭 Client 前）
+	if p.discovery != nil {
+		p.discovery.Stop()
+	}
+
 	// 关闭客户端 (会停止 discovery)
 	if p.client != nil {
 		p.client.Close()
