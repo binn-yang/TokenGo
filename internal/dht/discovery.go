@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"sync"
 	"time"
@@ -216,7 +217,7 @@ func (d *Discovery) DiscoverExits(ctx context.Context) ([]peer.AddrInfo, error) 
 	return peers, nil
 }
 
-// DiscoverExitsWithKeys 发现 Exit 节点并获取公钥
+// DiscoverExitsWithKeys 发现 Exit 节点并通过 libp2p stream 获取公钥
 func (d *Discovery) DiscoverExitsWithKeys(ctx context.Context) ([]ExitNodeInfo, error) {
 	// 检查缓存
 	d.cache.mu.RLock()
@@ -234,20 +235,12 @@ func (d *Discovery) DiscoverExitsWithKeys(ctx context.Context) ([]ExitNodeInfo, 
 		return nil, err
 	}
 
-	// 获取每个 Exit 的公钥
+	// 通过 stream 获取每个 Exit 的公钥
 	var exits []ExitNodeInfo
 	for _, p := range peers {
-		// 从 DHT 获取公钥
-		key := ExitPubKeyPrefix + p.ID.String()
-		value, err := d.node.DHT().GetValue(ctx, key)
+		keyInfo, err := d.fetchPubKeyViaStream(ctx, p)
 		if err != nil {
-			log.Printf("警告: 获取 Exit %s 公钥失败: %v", p.ID, err)
-			continue
-		}
-
-		var keyInfo ExitKeyInfo
-		if err := json.Unmarshal(value, &keyInfo); err != nil {
-			log.Printf("警告: 解析 Exit %s 公钥失败: %v", p.ID, err)
+			log.Printf("警告: 通过 stream 获取 Exit %s 公钥失败: %v", p.ID, err)
 			continue
 		}
 
@@ -269,6 +262,34 @@ func (d *Discovery) DiscoverExitsWithKeys(ctx context.Context) ([]ExitNodeInfo, 
 	}
 
 	return exits, nil
+}
+
+// fetchPubKeyViaStream 通过 libp2p stream 直接从 Exit 获取 OHTTP 公钥
+func (d *Discovery) fetchPubKeyViaStream(ctx context.Context, peerInfo peer.AddrInfo) (*ExitKeyInfo, error) {
+	// 先连接到 Exit peer
+	if err := d.node.Host().Connect(ctx, peerInfo); err != nil {
+		return nil, fmt.Errorf("连接 Exit peer 失败: %w", err)
+	}
+
+	// 打开 pubkey stream
+	s, err := d.node.Host().NewStream(ctx, peerInfo.ID, PubKeyProtocol)
+	if err != nil {
+		return nil, fmt.Errorf("打开 pubkey stream 失败: %w", err)
+	}
+	defer s.Close()
+
+	// 读取响应
+	data, err := io.ReadAll(io.LimitReader(s, 4096))
+	if err != nil {
+		return nil, fmt.Errorf("读取公钥数据失败: %w", err)
+	}
+
+	var keyInfo ExitKeyInfo
+	if err := json.Unmarshal(data, &keyInfo); err != nil {
+		return nil, fmt.Errorf("解析公钥数据失败: %w", err)
+	}
+
+	return &keyInfo, nil
 }
 
 // GetCachedExitsWithKeys 获取缓存的 Exit 节点（含公钥）

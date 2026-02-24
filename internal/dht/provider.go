@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/ipfs/go-cid"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/multiformats/go-multihash"
 )
 
@@ -18,8 +20,8 @@ const (
 	RelayServiceNamespace = "/tokengo/relay/v1"
 	ExitServiceNamespace  = "/tokengo/exit/v1"
 
-	// Exit 公钥存储前缀
-	ExitPubKeyPrefix = "/tokengo/exit-pubkey/"
+	// libp2p stream 协议：用于 Client 直接从 Exit 获取 OHTTP 公钥
+	PubKeyProtocol = protocol.ID("/tokengo/pubkey/1.0.0")
 
 	// Provider 刷新间隔
 	ProviderRefreshInterval = 3 * time.Minute
@@ -123,13 +125,10 @@ func (p *Provider) Register(info *ServiceInfo) error {
 		return fmt.Errorf("注册服务失败（重试 %d 次）: %w", maxRetries, lastErr)
 	}
 
-	// Exit 节点：存储公钥到 DHT
+	// Exit 节点：注册公钥 stream handler
 	if info.PublicKey != nil && len(info.PublicKey) > 0 {
-		if err := p.storePublicKey(p.ctx); err != nil {
-			log.Printf("警告: 存储公钥到 DHT 失败: %v", err)
-		} else {
-			log.Printf("已存储 Exit 公钥到 DHT")
-		}
+		p.registerPubKeyHandler()
+		log.Printf("已注册 Exit 公钥 stream handler: %s", PubKeyProtocol)
 	}
 
 	p.mu.Lock()
@@ -154,31 +153,33 @@ func (p *Provider) createServiceCID() (cid.Cid, error) {
 	return cid.NewCidV1(cid.Raw, hash), nil
 }
 
-// storePublicKey 存储 Exit 公钥到 DHT
-func (p *Provider) storePublicKey(ctx context.Context) error {
-	if p.serviceInfo == nil || p.serviceInfo.PublicKey == nil {
-		return nil
-	}
+// registerPubKeyHandler 注册 libp2p stream handler，供 Client 直接获取 OHTTP 公钥
+func (p *Provider) registerPubKeyHandler() {
+	p.node.Host().SetStreamHandler(PubKeyProtocol, func(s network.Stream) {
+		defer s.Close()
 
-	// 构建 DHT key
-	key := ExitPubKeyPrefix + p.node.PeerID().String()
+		p.mu.RLock()
+		info := p.serviceInfo
+		p.mu.RUnlock()
 
-	// 序列化公钥信息
-	info := ExitKeyInfo{
-		KeyID:     p.serviceInfo.KeyID,
-		PublicKey: p.serviceInfo.PublicKey,
-	}
-	value, err := json.Marshal(info)
-	if err != nil {
-		return fmt.Errorf("序列化公钥信息失败: %w", err)
-	}
+		if info == nil || info.PublicKey == nil {
+			return
+		}
 
-	// 存储到 DHT
-	if err := p.node.DHT().PutValue(ctx, key, value); err != nil {
-		return fmt.Errorf("存储到 DHT 失败: %w", err)
-	}
+		keyInfo := ExitKeyInfo{
+			KeyID:     info.KeyID,
+			PublicKey: info.PublicKey,
+		}
+		data, err := json.Marshal(keyInfo)
+		if err != nil {
+			log.Printf("警告: 序列化公钥信息失败: %v", err)
+			return
+		}
 
-	return nil
+		if _, err := s.Write(data); err != nil {
+			log.Printf("警告: 发送公钥失败: %v", err)
+		}
+	})
 }
 
 // refreshLoop 定期刷新 Provider 记录
@@ -198,7 +199,6 @@ func (p *Provider) refreshLoop() {
 				p.mu.RUnlock()
 				continue
 			}
-			serviceInfo := p.serviceInfo
 			p.mu.RUnlock()
 
 			c, err := p.createServiceCID()
@@ -211,13 +211,6 @@ func (p *Provider) refreshLoop() {
 				log.Printf("警告: 刷新服务注册失败: %v", err)
 			} else {
 				log.Printf("已刷新服务注册: %s", p.namespace)
-			}
-
-			// Exit 节点：刷新公钥
-			if serviceInfo != nil && serviceInfo.PublicKey != nil {
-				if err := p.storePublicKey(p.ctx); err != nil {
-					log.Printf("警告: 刷新公钥失败: %v", err)
-				}
 			}
 		}
 	}
