@@ -106,7 +106,7 @@ func (r *RelayNode) Start() error {
 	log.Printf("模式: 反向隧道 (Exit 主动连接注册)")
 
 	// 启动 Registry 清理任务
-	r.registry.StartCleanup(r.ctx, 60*time.Second)
+	r.registry.StartCleanup(r.ctx, 90*time.Second)
 
 	// 启动 DHT 节点（仅用于注册 Relay 服务）
 	if r.dhtNode != nil {

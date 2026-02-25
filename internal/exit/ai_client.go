@@ -25,6 +25,10 @@ func NewAIClient(baseURL, apiKey string, headers map[string]string) *AIClient {
 		headers: headers,
 		httpClient: &http.Client{
 			Timeout: 120 * time.Second, // AI 响应可能较慢
+			Transport: &http.Transport{
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: 30 * time.Second,
+			},
 		},
 		streamClient: &http.Client{
 			// 不设全局 Timeout，SSE 连接持续时间不确定

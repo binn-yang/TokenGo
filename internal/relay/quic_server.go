@@ -205,22 +205,23 @@ func (s *QUICServer) handleExitConnection(ctx context.Context, conn quic.Connect
 			}
 		}
 
-		// 读取心跳消息
-		hbMsg, err := protocol.Decode(hbStream)
-		if err != nil {
-			log.Printf("Exit %s: 读取心跳消息失败: %v", pubKeyHash, err)
-			hbStream.Close()
-			continue
-		}
+		// 并发处理心跳，避免阻塞 AcceptStream 循环，加速 MAX_STREAMS 信用补充
+		go func(stream quic.Stream) {
+			defer stream.Close()
+			hbMsg, err := protocol.Decode(stream)
+			if err != nil {
+				log.Printf("Exit %s: 读取心跳消息失败: %v", pubKeyHash, err)
+				return
+			}
 
-		if hbMsg.Type == protocol.MessageTypeHeartbeat {
-			s.registry.UpdateHeartbeat(pubKeyHash)
-			ackMsg := protocol.NewHeartbeatAckMessage()
-			hbStream.Write(ackMsg.Encode())
-		} else {
-			log.Printf("Exit %s: 心跳阶段收到非心跳消息类型 %d", pubKeyHash, hbMsg.Type)
-		}
-		hbStream.Close()
+			if hbMsg.Type == protocol.MessageTypeHeartbeat {
+				s.registry.UpdateHeartbeat(pubKeyHash)
+				ackMsg := protocol.NewHeartbeatAckMessage()
+				stream.Write(ackMsg.Encode())
+			} else {
+				log.Printf("Exit %s: 心跳阶段收到非心跳消息类型 %d", pubKeyHash, hbMsg.Type)
+			}
+		}(hbStream)
 	}
 }
 
