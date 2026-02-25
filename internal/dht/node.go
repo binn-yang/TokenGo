@@ -16,6 +16,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/core/routing"
 	"github.com/libp2p/go-libp2p/p2p/net/connmgr"
+	"github.com/libp2p/go-libp2p/p2p/security/noise"
 	"github.com/multiformats/go-multiaddr"
 )
 
@@ -115,6 +116,8 @@ func (n *Node) Start(ctx context.Context) error {
 		libp2p.Identity(n.identity.PrivKey),
 		libp2p.ListenAddrs(listenAddrs...),
 		libp2p.ConnectionManager(connMgr),
+		libp2p.Security(noise.ID, noise.New),
+		libp2p.DefaultMuxers,
 		libp2p.EnableNATService(),
 		libp2p.EnableRelay(),
 		libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
