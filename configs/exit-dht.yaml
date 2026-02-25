@@ -4,6 +4,7 @@
 ohttp_private_key_file: "./keys/ohttp_private.key"
 ai_backend:
   url: "http://localhost:11434"
+insecure_skip_verify: true  # 开发环境使用自签名证书
 
 dht:
   listen_addrs:
