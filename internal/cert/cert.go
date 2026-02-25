@@ -164,11 +164,23 @@ func VerifyPeerID(rawCerts [][]byte, expectedPeerID peer.ID) error {
 	return fmt.Errorf("证书 PeerID 不匹配: 期望 %s, 证书中为 %s", peerIDStr, cert.Subject.CommonName)
 }
 
-// CreatePeerIDVerifyTLSConfig 创建验证 PeerID 的 TLS 配置
+// CreatePeerIDVerifyTLSConfig 创建验证 PeerID 的 TLS 配置 (Client 使用)
 func CreatePeerIDVerifyTLSConfig(expectedPeerID peer.ID) *tls.Config {
 	return &tls.Config{
 		InsecureSkipVerify: true, // 跳过默认验证，使用自定义验证
-		NextProtos:         []string{"tokengo-relay", "tokengo-exit"},
+		NextProtos:         []string{"tokengo-relay"},
+		MinVersion:         tls.VersionTLS13,
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			return VerifyPeerID(rawCerts, expectedPeerID)
+		},
+	}
+}
+
+// CreateExitTLSConfig 创建 Exit 连接 Relay 的 TLS 配置
+func CreateExitTLSConfig(expectedPeerID peer.ID) *tls.Config {
+	return &tls.Config{
+		InsecureSkipVerify: true, // 跳过默认验证，使用自定义验证
+		NextProtos:         []string{"tokengo-exit"},
 		MinVersion:         tls.VersionTLS13,
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			return VerifyPeerID(rawCerts, expectedPeerID)

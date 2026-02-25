@@ -1,19 +1,17 @@
 # TokenGo Relay 配置
-# 私有 DHT 网络模式
+# 私有 DHT 网络模式 - Relay 作为种子节点
 
 listen: ":4433"
 
 # TLS 证书自动生成（绑定 PeerID），无需配置
-# 可选：手动指定证书文件
-# tls:
-#   cert_file: "./certs/cert.pem"
-#   key_file: "./certs/key.pem"
 
 dht:
+  enabled: true
   listen_addrs:
     - "/ip4/0.0.0.0/tcp/4003"
   external_addrs:
-    - "/ip4/43.156.60.67/udp/4433"  # QUIC 服务地址，通过 DHT 广播
+    - "/ip4/43.156.60.67/tcp/4003"
+    - "/ip4/43.156.60.67/udp/4433"
   private_key_file: "./keys/relay_identity.key/identity.key"
   mode: "server"
-  # bootstrap_peers 可选，默认使用内置列表
+  # Relay 作为种子节点，不需要 bootstrap_peers

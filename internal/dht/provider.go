@@ -78,6 +78,19 @@ func (p *Provider) Register(info *ServiceInfo) error {
 		return fmt.Errorf("创建服务 CID 失败: %w", err)
 	}
 
+	// 检查路由表是否为空（种子节点模式）
+	routingTableSize := p.node.DHT().RoutingTable().Size()
+	if routingTableSize == 0 {
+		log.Printf("种子节点模式: 路由表为空，跳过 DHT Provide（其他节点将连接到此节点）")
+		p.mu.Lock()
+		p.registered = true
+		p.mu.Unlock()
+		// 启动心跳刷新（当有其他节点加入后会成功）
+		p.wg.Add(1)
+		go p.refreshLoop()
+		return nil
+	}
+
 	// 带重试的注册（等待 DHT 路由表填充）
 	backoff := 3 * time.Second
 	const maxBackoff = 30 * time.Second
@@ -142,6 +155,12 @@ func (p *Provider) refreshLoop() {
 	ticker := time.NewTicker(ProviderRefreshInterval)
 	defer ticker.Stop()
 
+	// 快速重试定时器（用于种子节点在路由表填充后注册）
+	retryTicker := time.NewTicker(10 * time.Second)
+	defer retryTicker.Stop()
+
+	registered := false
+
 	for {
 		select {
 		case <-p.ctx.Done():
@@ -164,6 +183,22 @@ func (p *Provider) refreshLoop() {
 				log.Printf("警告: 刷新服务注册失败: %v", err)
 			} else {
 				log.Printf("已刷新服务注册: %s", p.namespace)
+				if !registered {
+					registered = true
+					log.Printf("已注册服务到 DHT: %s (PeerID: %s)", p.namespace, p.node.PeerID())
+				}
+			}
+		case <-retryTicker.C:
+			// 种子节点：当路由表有新节点时尝试注册
+			if !registered && p.node.DHT().RoutingTable().Size() > 0 {
+				c, err := p.createServiceCID()
+				if err != nil {
+					continue
+				}
+				if err := p.node.DHT().Provide(p.ctx, c, true); err == nil {
+					registered = true
+					log.Printf("种子节点已注册服务到 DHT: %s (PeerID: %s)", p.namespace, p.node.PeerID())
+				}
 			}
 		}
 	}

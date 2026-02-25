@@ -210,8 +210,8 @@ func (t *TunnelClient) connectAndRegister(ctx context.Context, addr string, peer
 	// 根据是否有 PeerID 选择 TLS 配置
 	var tlsConfig *tls.Config
 	if peerID != "" {
-		// 使用 PeerID 验证证书
-		tlsConfig = cert.CreatePeerIDVerifyTLSConfig(peerID)
+		// 使用 PeerID 验证证书 (Exit 使用专用 ALPN)
+		tlsConfig = cert.CreateExitTLSConfig(peerID)
 	} else {
 		// 静态模式，跳过证书验证
 		tlsConfig = &tls.Config{

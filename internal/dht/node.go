@@ -185,9 +185,21 @@ func (n *Node) connectBootstrapPeers(ctx context.Context) error {
 	// 使用 ResolveBootstrapPeers 获取所有 bootstrap peers (硬编码 + GitHub JSON + 配置)
 	addrInfos := ResolveBootstrapPeers(ctx, n.config.BootstrapPeers)
 
-	if len(addrInfos) == 0 {
-		return fmt.Errorf("没有可用的 bootstrap peers")
+	// 过滤掉自己的地址（种子节点不需要连接自己）
+	var filteredAddrInfos []peer.AddrInfo
+	for _, info := range addrInfos {
+		if info.ID != n.identity.PeerID {
+			filteredAddrInfos = append(filteredAddrInfos, info)
+		}
 	}
+
+	if len(filteredAddrInfos) == 0 {
+		// 没有其他节点可连接，种子节点模式
+		log.Printf("种子节点模式: 无需连接 bootstrap peers")
+		return nil
+	}
+
+	addrInfos = filteredAddrInfos
 
 	var connected int32
 	var wg sync.WaitGroup

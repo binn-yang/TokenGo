@@ -3,7 +3,7 @@
 # 版本信息
 VERSION := 0.1.0
 BUILD_TIME := $(shell date +%Y-%m-%d_%H:%M:%S)
-LDFLAGS := -ldflags "-X main.version=$(VERSION)"
+LDFLAGS := -ldflags "-s -w -X main.version=$(VERSION)"
 
 # 输出目录
 BUILD_DIR := build
