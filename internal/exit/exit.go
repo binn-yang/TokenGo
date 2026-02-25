@@ -29,11 +29,6 @@ type ExitNode struct {
 
 // New 创建出口节点（DHT 发现模式）
 func New(cfg *config.ExitConfig) (*ExitNode, error) {
-	// DHT 必须启用以发现 Relay
-	if !cfg.DHT.Enabled {
-		return nil, fmt.Errorf("必须启用 DHT 配置以发现 Relay 节点")
-	}
-
 	return newExitNode(cfg, "")
 }
 
@@ -86,11 +81,11 @@ func newExitNode(cfg *config.ExitConfig, staticRelay string) (*ExitNode, error) 
 	keyConfig := crypto.EncodeKeyConfig(keyID, publicKey)
 
 	node := &ExitNode{
-		cfg:         cfg,
-		ohttpHandler: ohttpHandler,
-		publicKey:    publicKey,
-		keyID:        keyID,
-		staticRelay:  staticRelay,
+		cfg:           cfg,
+		ohttpHandler:  ohttpHandler,
+		publicKey:     publicKey,
+		keyID:         keyID,
+		staticRelay:   staticRelay,
 	}
 
 	// 静态模式（用于 serve 命令）
@@ -99,16 +94,14 @@ func newExitNode(cfg *config.ExitConfig, staticRelay string) (*ExitNode, error) 
 		return node, nil
 	}
 
-	// DHT 发现模式
-	// 创建 DHT 节点
+	// DHT 发现模式（私有网络）
 	dhtCfg := &dht.Config{
-		PrivateKeyPath:   cfg.DHT.PrivateKeyFile,
-		BootstrapPeers:   cfg.DHT.BootstrapPeers,
-		ListenAddrs:      cfg.DHT.ListenAddrs,
-		ExternalAddrs:    cfg.DHT.ExternalAddrs,
-		Mode:             "server",
-		ServiceType:      "exit",
-		UseIPFSBootstrap: cfg.DHT.UseIPFSBootstrap,
+		PrivateKeyPath: cfg.DHT.PrivateKeyFile,
+		BootstrapPeers: cfg.DHT.BootstrapPeers,
+		ListenAddrs:    cfg.DHT.ListenAddrs,
+		ExternalAddrs:  cfg.DHT.ExternalAddrs,
+		Mode:           "server",
+		ServiceType:    "exit",
 	}
 
 	dhtNode, err := dht.NewNode(dhtCfg)

@@ -14,7 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/binn/tokengo/internal/bootstrap"
 	"github.com/binn/tokengo/internal/config"
 	"github.com/binn/tokengo/internal/crypto"
 	"github.com/binn/tokengo/internal/dht"
@@ -22,12 +21,12 @@ import (
 
 // LocalProxy 本地 HTTP 代理服务器
 type LocalProxy struct {
-	cfg             *config.ClientConfig
-	client          *Client
-	server          *http.Server
-	dhtNode         *dht.Node
-	discovery       *dht.Discovery
-	bootstrapClient *bootstrap.Client
+	cfg      *config.ClientConfig
+	client   *Client
+	server   *http.Server
+	dhtNode  *dht.Node
+	discovery *dht.Discovery
+	progress ProgressReporter
 }
 
 // NewLocalProxy 创建本地代理
@@ -38,43 +37,28 @@ func NewLocalProxy(cfg *config.ClientConfig) (*LocalProxy, error) {
 	}
 
 	proxy := &LocalProxy{
-		cfg: cfg,
+		cfg:      cfg,
+		progress: NewConsoleProgress(),
 	}
 
-	// DHT 动态发现模式
-	log.Println("模式: DHT 动态发现")
-
-	// 创建 DHT 节点（如果启用）
-	if cfg.DHT.Enabled {
-		dhtCfg := &dht.Config{
-			PrivateKeyPath:   cfg.DHT.PrivateKeyFile,
-			BootstrapPeers:   cfg.DHT.BootstrapPeers,
-			ListenAddrs:      cfg.DHT.ListenAddrs,
-			Mode:             "client",
-			ServiceType:      "client",
-			UseIPFSBootstrap: cfg.DHT.UseIPFSBootstrap,
-		}
-
-		dhtNode, err := dht.NewNode(dhtCfg)
-		if err != nil {
-			return nil, fmt.Errorf("创建 DHT 节点失败: %w", err)
-		}
-		proxy.dhtNode = dhtNode
-		log.Println("DHT 发现: 已启用")
+	// DHT 始终启用（私有网络）
+	dhtCfg := &dht.Config{
+		BootstrapPeers: cfg.BootstrapPeers, // 可选覆盖
+		ListenAddrs:    []string{"/ip4/0.0.0.0/tcp/0"},
+		Mode:           "client",
+		ServiceType:    "client",
 	}
 
-	// 创建 Bootstrap API 客户端（如果配置）
-	if cfg.Bootstrap.URL != "" {
-		proxy.bootstrapClient = bootstrap.NewClient(cfg.Bootstrap.URL, cfg.Bootstrap.Interval)
-		log.Printf("Bootstrap API: %s", cfg.Bootstrap.URL)
+	dhtNode, err := dht.NewNode(dhtCfg)
+	if err != nil {
+		return nil, fmt.Errorf("创建 DHT 节点失败: %w", err)
 	}
+	proxy.dhtNode = dhtNode
 
 	// 创建 Client（不预设 Relay/Exit，后续动态发现）
 	client, err := NewClientDynamic(cfg.InsecureSkipVerify)
 	if err != nil {
-		if proxy.dhtNode != nil {
-			proxy.dhtNode.Stop()
-		}
+		proxy.dhtNode.Stop()
 		return nil, fmt.Errorf("创建客户端失败: %w", err)
 	}
 	proxy.client = client
@@ -95,8 +79,9 @@ func NewStaticProxy(listen, relayAddr string, keyID uint8, publicKey []byte, ins
 	}
 
 	return &LocalProxy{
-		cfg:    cfg,
-		client: client,
+		cfg:      cfg,
+		client:   client,
+		progress: NewSilentProgress(), // 静态模式静默
 	}, nil
 }
 
@@ -104,25 +89,18 @@ func NewStaticProxy(listen, relayAddr string, keyID uint8, publicKey []byte, ins
 func (p *LocalProxy) Start() error {
 	ctx := context.Background()
 
-	// 启动 DHT 节点（如果启用）
-	if p.dhtNode != nil {
-		if err := p.dhtNode.Start(ctx); err != nil {
-			return fmt.Errorf("启动 DHT 节点失败: %w", err)
-		}
-		log.Printf("DHT 节点已启动, PeerID: %s", p.dhtNode.PeerID())
-	}
-
-	// 启动 Bootstrap API 客户端（如果配置）
-	if p.bootstrapClient != nil {
-		p.bootstrapClient.Start()
-		log.Println("Bootstrap API 客户端已启动")
-	}
-
-	log.Printf("本地代理启动，监听 %s", p.cfg.Listen)
-
-	// 动态发现并连接
+	// 动态发现模式
 	if p.client.GetRelayAddr() == "" {
-		// 需要动态发现 Relay
+		// 启动 DHT 节点
+		if p.dhtNode != nil {
+			p.progress.OnBootstrapConnecting()
+			if err := p.dhtNode.Start(ctx); err != nil {
+				return fmt.Errorf("启动 DHT 节点失败: %w", err)
+			}
+			p.progress.OnBootstrapConnected(1, 1) // 简化处理
+		}
+
+		// 动态发现并连接
 		if err := p.discoverAndConnect(ctx); err != nil {
 			log.Printf("警告: 节点发现失败: %v (将在首次请求时重试)", err)
 		}
@@ -152,27 +130,28 @@ func (p *LocalProxy) Start() error {
 	// 处理关闭信号
 	go p.handleShutdown()
 
+	p.progress.OnReady(p.cfg.Listen)
 	return p.server.ListenAndServe()
 }
 
 // discoverAndConnect 发现节点并连接
 // 新架构：先连接 Relay，再从 Relay 查询 Exit 公钥
 func (p *LocalProxy) discoverAndConnect(ctx context.Context) error {
-	// 1. 创建 Discovery 并持久化（重连时 Client 自动走 connectWithDiscovery）
+	// 1. 创建 Discovery 并持久化
 	if p.dhtNode != nil {
+		p.progress.OnDiscoveringRelays()
 		p.discovery = dht.NewDiscovery(p.dhtNode)
 		p.discovery.Start()
 		p.client.SetDiscovery(p.discovery)
-		log.Println("DHT Discovery 已持久化到 Client")
 	}
 
-	// 2. 先连接 Relay（Client 内部走 connectWithDiscovery）
+	// 2. 连接 Relay（Client 内部走 connectWithDiscovery）
 	if err := p.client.Connect(ctx); err != nil {
 		return fmt.Errorf("连接 Relay 失败: %w", err)
 	}
 	log.Printf("已连接到 Relay: %s", p.client.GetRelayAddr())
 
-	// 3. 从 Relay 查询 Exit 公钥（回退到 Bootstrap API）
+	// 3. 从 Relay 查询 Exit 公钥
 	keyID, publicKey, err := p.discoverExit(ctx)
 	if err != nil {
 		return fmt.Errorf("发现 Exit 失败: %w", err)
@@ -187,33 +166,29 @@ func (p *LocalProxy) discoverAndConnect(ctx context.Context) error {
 	return nil
 }
 
-// discoverExit 从 Relay 查询 Exit 公钥，回退到 Bootstrap API
+// discoverExit 从 Relay 查询 Exit 公钥
 func (p *LocalProxy) discoverExit(ctx context.Context) (keyID uint8, publicKey []byte, err error) {
+	p.progress.OnFetchingExitKeys()
+
 	// 从已连接的 Relay 查询 Exit 公钥列表
 	entries, queryErr := p.client.QueryExitKeys(ctx)
-	if queryErr == nil && len(entries) > 0 {
-		entry := entries[0]
-		kid, pubKey, decodeErr := crypto.DecodeKeyConfig(entry.KeyConfig)
-		if decodeErr == nil {
-			log.Printf("从 Relay 获取 Exit 公钥 (KeyID: %d, Hash: %s)", kid, entry.PubKeyHash)
-			return kid, pubKey, nil
-		}
-		log.Printf("解析 Exit KeyConfig 失败: %v", decodeErr)
-	}
 	if queryErr != nil {
-		log.Printf("从 Relay 查询 Exit 公钥失败: %v", queryErr)
+		return 0, nil, fmt.Errorf("从 Relay 查询 Exit 公钥失败: %w", queryErr)
 	}
 
-	// Bootstrap API 回退
-	if p.bootstrapClient != nil {
-		exits := p.bootstrapClient.GetExits()
-		if len(exits) > 0 && exits[0].PublicKey != nil {
-			log.Printf("Bootstrap API 发现 Exit (含公钥)")
-			return 0, exits[0].PublicKey, nil
-		}
+	if len(entries) == 0 {
+		return 0, nil, fmt.Errorf("Relay 没有已注册的 Exit 节点")
 	}
 
-	return 0, nil, fmt.Errorf("无法发现 Exit 节点公钥 (请确保 Relay 有已注册的 Exit 或 Bootstrap API 配置正确)")
+	entry := entries[0]
+	kid, pubKey, decodeErr := crypto.DecodeKeyConfig(entry.KeyConfig)
+	if decodeErr != nil {
+		return 0, nil, fmt.Errorf("解析 Exit KeyConfig 失败: %w", decodeErr)
+	}
+
+	p.progress.OnExitKeyFetched(entry.PubKeyHash)
+	log.Printf("从 Relay 获取 Exit 公钥 (KeyID: %d, Hash: %s)", kid, entry.PubKeyHash)
+	return kid, pubKey, nil
 }
 
 // handleRequest 统一请求处理 (协议无关)

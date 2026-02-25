@@ -21,7 +21,6 @@ import (
 	"github.com/binn/tokengo/internal/client"
 	"github.com/binn/tokengo/internal/config"
 	"github.com/binn/tokengo/internal/crypto"
-	"github.com/binn/tokengo/internal/dht"
 	"github.com/binn/tokengo/internal/exit"
 	"github.com/binn/tokengo/internal/identity"
 	"github.com/binn/tokengo/internal/relay"
@@ -45,7 +44,6 @@ func main() {
 	rootCmd.AddCommand(relayCmd())
 	rootCmd.AddCommand(exitCmd())
 	rootCmd.AddCommand(serveCmd())
-	rootCmd.AddCommand(bootstrapCmd())
 	rootCmd.AddCommand(keygenCmd())
 
 	if err := rootCmd.Execute(); err != nil {
@@ -58,13 +56,12 @@ func clientCmd() *cobra.Command {
 	var configPath string
 	var listen string
 	var insecure bool
+	var bootstrapPeers []string
 
 	cmd := &cobra.Command{
 		Use:   "client",
 		Short: "启动客户端 (本地 OpenAI 兼容 API 代理)",
-		Long: `启动客户端，提供本地 HTTP API 端点，通过 OHTTP+QUIC 转发请求到 AI 后端。
-
-默认使用公共 IPFS DHT 网络自动发现 Relay 和 Exit 节点，无需任何配置。
+		Long: `启动客户端，通过私有 DHT 网络自动发现 Relay 和 Exit 节点。
 
 示例:
   # 零配置启动 (推荐)
@@ -73,8 +70,8 @@ func clientCmd() *cobra.Command {
   # 使用配置文件
   tokengo client --config configs/client.yaml
 
-  # 指定监听地址
-  tokengo client --listen :9000`,
+  # 自定义引导节点
+  tokengo client --bootstrap-peer /ip4/1.2.3.4/udp/4433/p2p/12D3Koo...`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var cfg *config.ClientConfig
 
@@ -85,24 +82,23 @@ func clientCmd() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("加载配置失败: %w", err)
 				}
-				if cmd.Flags().Changed("listen") {
-					cfg.Listen = listen
-				}
-				if cmd.Flags().Changed("insecure") {
-					cfg.InsecureSkipVerify = insecure
-				}
 			} else {
-				// 默认 DHT 发现模式：使用公共 IPFS Bootstrap
-				log.Printf("DHT 发现模式: 使用公共 IPFS Bootstrap 节点")
-				cfg = &config.ClientConfig{
-					Listen:             listen,
-					InsecureSkipVerify: insecure,
-					DHT: config.DHTConfig{
-						Enabled:          true,
-						UseIPFSBootstrap: true,
-						ListenAddrs:      []string{"/ip4/0.0.0.0/tcp/0"},
-					},
-				}
+				// 零配置模式
+				cfg = &config.ClientConfig{}
+			}
+
+			// CLI 覆盖
+			if cmd.Flags().Changed("listen") {
+				cfg.Listen = listen
+			}
+			if cfg.Listen == "" {
+				cfg.Listen = "127.0.0.1:8080"
+			}
+			if cmd.Flags().Changed("insecure") {
+				cfg.InsecureSkipVerify = insecure
+			}
+			if len(bootstrapPeers) > 0 {
+				cfg.BootstrapPeers = bootstrapPeers
 			}
 
 			proxy, err := client.NewLocalProxy(cfg)
@@ -117,6 +113,8 @@ func clientCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&configPath, "config", "c", "", "配置文件路径")
 	cmd.Flags().StringVarP(&listen, "listen", "l", "127.0.0.1:8080", "监听地址")
 	cmd.Flags().BoolVar(&insecure, "insecure", false, "跳过 TLS 证书验证")
+	cmd.Flags().StringArrayVar(&bootstrapPeers, "bootstrap-peer", nil,
+		"自定义引导节点 (multiaddr 格式，可多次指定)")
 
 	return cmd
 }
@@ -200,14 +198,13 @@ func exitCmd() *cobra.Command {
 		Long: `启动出口节点，通过 DHT 发现 Relay 并建立反向隧道，解密 OHTTP 请求并转发到 AI 后端。
 
 Exit 节点主动连接 Relay（无需公网 IP），通过 QUIC 反向隧道接收请求。
-必须启用 DHT 配置以发现 Relay 节点。
 
 示例:
   # 使用配置文件 (推荐)
-  tokengo exit --config configs/exit-dht.yaml
+  tokengo exit --config configs/exit.yaml
 
   # 指定 AI 后端
-  tokengo exit --config configs/exit-dht.yaml --backend https://api.openai.com --api-key sk-xxx`,
+  tokengo exit --config configs/exit.yaml --backend https://api.openai.com --api-key sk-xxx`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var cfg *config.ExitConfig
 			var err error
@@ -219,11 +216,6 @@ Exit 节点主动连接 Relay（无需公网 IP），通过 QUIC 反向隧道接
 					OHTTPPrivateKeyFile: privateKeyFile,
 					AIBackend:           config.AIBackend{URL: backend, APIKey: apiKey, Headers: headerMap},
 					InsecureSkipVerify:  insecure,
-					DHT: config.DHTConfig{
-						Enabled:          true,
-						UseIPFSBootstrap: true,
-						ListenAddrs:      []string{"/ip4/0.0.0.0/tcp/0"},
-					},
 				}
 				// 如果没有指定密钥，自动生成
 				if privateKeyFile == "" {
@@ -244,11 +236,6 @@ Exit 节点主动连接 Relay（无需公网 IP），通过 QUIC 反向隧道接
 			// 命令行覆盖
 			if cmd.Flags().Changed("insecure") {
 				cfg.InsecureSkipVerify = insecure
-			}
-
-			// DHT 必须启用 (exit.New 会再次检查，但这里提前给出友好提示)
-			if !cfg.DHT.Enabled {
-				return fmt.Errorf("必须启用 DHT 配置以发现 Relay 节点，请在配置文件中设置 dht.enabled: true")
 			}
 
 			e, err := exit.New(cfg)
@@ -409,41 +396,6 @@ func serveCmd() *cobra.Command {
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "AI 后端 API Key")
 	cmd.Flags().StringArrayVar(&headers, "header", nil, "自定义后端请求头 (格式: Key:Value，可多次指定)")
 	cmd.Flags().BoolVar(&insecure, "insecure", false, "跳过 TLS 证书验证 (使用自签名证书时需要)")
-
-	return cmd
-}
-
-// bootstrapCmd Bootstrap 节点命令
-func bootstrapCmd() *cobra.Command {
-	var configPath string
-	var printPeerID bool
-
-	cmd := &cobra.Command{
-		Use:   "bootstrap",
-		Short: "启动 Bootstrap 节点 (DHT 引导节点)",
-		Long:  `启动 Bootstrap 节点，为其他节点提供 DHT 网络入口点。`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.LoadBootstrapConfig(configPath)
-			if err != nil {
-				return fmt.Errorf("加载配置失败: %w", err)
-			}
-
-			bootstrap, err := dht.NewBootstrapNode(cfg)
-			if err != nil {
-				return fmt.Errorf("创建 Bootstrap 节点失败: %w", err)
-			}
-
-			if printPeerID {
-				fmt.Println(bootstrap.PeerID())
-				return nil
-			}
-
-			return bootstrap.Run()
-		},
-	}
-
-	cmd.Flags().StringVarP(&configPath, "config", "c", "configs/bootstrap.yaml", "配置文件路径")
-	cmd.Flags().BoolVar(&printPeerID, "print-peer-id", false, "仅打印 PeerID 后退出")
 
 	return cmd
 }

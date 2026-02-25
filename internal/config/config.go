@@ -13,14 +13,7 @@ type ClientConfig struct {
 	Listen             string        `yaml:"listen"`
 	Timeout            time.Duration `yaml:"timeout"`
 	InsecureSkipVerify bool          `yaml:"insecure_skip_verify"` // 仅开发环境使用
-	DHT                DHTConfig     `yaml:"dht,omitempty"`        // DHT 发现配置
-	Bootstrap          BootstrapAPI  `yaml:"bootstrap,omitempty"`  // Bootstrap API 配置
-}
-
-// BootstrapAPI Bootstrap API 配置
-type BootstrapAPI struct {
-	URL      string        `yaml:"url,omitempty"`      // Bootstrap API URL (如 https://bootstrap.example.com)
-	Interval time.Duration `yaml:"interval,omitempty"` // 刷新间隔
+	BootstrapPeers     []string      `yaml:"bootstrap_peers,omitempty"` // 可选，覆盖内置默认值
 }
 
 // RelayConfig 中继节点配置 (盲转发模式)
@@ -55,18 +48,11 @@ type AIBackend struct {
 
 // DHTConfig DHT 配置
 type DHTConfig struct {
-	Enabled          bool     `yaml:"enabled"`
-	BootstrapPeers   []string `yaml:"bootstrap_peers"`
-	ListenAddrs      []string `yaml:"listen_addrs"`
-	ExternalAddrs    []string `yaml:"external_addrs,omitempty"`
-	PrivateKeyFile   string   `yaml:"private_key_file"`
-	Mode             string   `yaml:"mode"` // "server" or "client"
-	UseIPFSBootstrap bool     `yaml:"use_ipfs_bootstrap,omitempty"`
-}
-
-// BootstrapConfig Bootstrap 节点配置
-type BootstrapConfig struct {
-	DHT DHTConfig `yaml:"dht"`
+	BootstrapPeers []string `yaml:"bootstrap_peers,omitempty"`
+	ListenAddrs    []string `yaml:"listen_addrs,omitempty"`
+	ExternalAddrs  []string `yaml:"external_addrs,omitempty"`
+	PrivateKeyFile string   `yaml:"private_key_file,omitempty"`
+	Mode           string   `yaml:"mode,omitempty"` // "server" or "client"
 }
 
 // LoadClientConfig 加载客户端配置
@@ -128,27 +114,6 @@ func LoadExitConfig(path string) (*ExitConfig, error) {
 	if cfg.AIBackend.URL == "" {
 		cfg.AIBackend.URL = "http://localhost:11434"
 	}
-
-	return &cfg, nil
-}
-
-// LoadBootstrapConfig 加载 Bootstrap 节点配置
-func LoadBootstrapConfig(path string) (*BootstrapConfig, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("读取配置文件失败: %w", err)
-	}
-
-	var cfg BootstrapConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("解析配置文件失败: %w", err)
-	}
-
-	// 设置默认值
-	if len(cfg.DHT.ListenAddrs) == 0 {
-		cfg.DHT.ListenAddrs = []string{"/ip4/0.0.0.0/tcp/4001"}
-	}
-	cfg.DHT.Mode = "server" // Bootstrap 始终是 server 模式
 
 	return &cfg, nil
 }

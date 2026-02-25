@@ -59,16 +59,16 @@ func New(cfg *config.RelayConfig) (*RelayNode, error) {
 	// 创建 Exit 注册表（替代原有的 Forwarder）
 	node.registry = NewRegistry()
 
-	// 如果启用了 DHT，仅用于注册 Relay 服务供 Client 发现
-	if cfg.DHT.Enabled {
+	// DHT 始终启用（私有网络）
+	// 如果配置了 DHT 相关字段，则启动 DHT 节点
+	if len(cfg.DHT.ListenAddrs) > 0 || cfg.DHT.PrivateKeyFile != "" {
 		dhtCfg := &dht.Config{
-			PrivateKeyPath:   cfg.DHT.PrivateKeyFile,
-			BootstrapPeers:   cfg.DHT.BootstrapPeers,
-			ListenAddrs:      cfg.DHT.ListenAddrs,
-			ExternalAddrs:    cfg.DHT.ExternalAddrs,
-			Mode:             "server",
-			ServiceType:      "relay",
-			UseIPFSBootstrap: cfg.DHT.UseIPFSBootstrap,
+			PrivateKeyPath: cfg.DHT.PrivateKeyFile,
+			BootstrapPeers: cfg.DHT.BootstrapPeers,
+			ListenAddrs:    cfg.DHT.ListenAddrs,
+			ExternalAddrs:  cfg.DHT.ExternalAddrs,
+			Mode:           "server",
+			ServiceType:    "relay",
 		}
 
 		dhtNode, err := dht.NewNode(dhtCfg)

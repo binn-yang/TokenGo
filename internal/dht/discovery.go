@@ -34,9 +34,7 @@ type Discovery struct {
 type serviceCache struct {
 	mu       sync.RWMutex
 	relays   []peer.AddrInfo
-	exits    []peer.AddrInfo
 	relayTTL time.Time
-	exitTTL  time.Time
 }
 
 // NewDiscovery 创建服务发现器
@@ -68,7 +66,6 @@ func (d *Discovery) refreshLoop() {
 
 	// 启动时立即发现
 	d.refreshRelays()
-	d.refreshExits()
 
 	ticker := time.NewTicker(CacheRefreshInterval)
 	defer ticker.Stop()
@@ -79,7 +76,6 @@ func (d *Discovery) refreshLoop() {
 			return
 		case <-ticker.C:
 			d.refreshRelays()
-			d.refreshExits()
 		}
 	}
 }
@@ -102,27 +98,6 @@ func (d *Discovery) refreshRelays() {
 
 	if len(peers) > 0 {
 		log.Printf("发现 %d 个 Relay 节点", len(peers))
-	}
-}
-
-// refreshExits 刷新 Exit 缓存
-func (d *Discovery) refreshExits() {
-	ctx, cancel := context.WithTimeout(d.ctx, DiscoveryTimeout)
-	defer cancel()
-
-	peers, err := d.findProviders(ctx, ExitServiceNamespace)
-	if err != nil {
-		log.Printf("警告: 发现 Exit 节点失败: %v", err)
-		return
-	}
-
-	d.cache.mu.Lock()
-	d.cache.exits = peers
-	d.cache.exitTTL = time.Now().Add(CacheRefreshInterval)
-	d.cache.mu.Unlock()
-
-	if len(peers) > 0 {
-		log.Printf("发现 %d 个 Exit 节点", len(peers))
 	}
 }
 
@@ -179,33 +154,6 @@ func (d *Discovery) DiscoverRelays(ctx context.Context) ([]peer.AddrInfo, error)
 	return peers, nil
 }
 
-// DiscoverExits 发现 Exit 节点
-func (d *Discovery) DiscoverExits(ctx context.Context) ([]peer.AddrInfo, error) {
-	// 检查缓存
-	d.cache.mu.RLock()
-	if time.Now().Before(d.cache.exitTTL) && len(d.cache.exits) > 0 {
-		peers := make([]peer.AddrInfo, len(d.cache.exits))
-		copy(peers, d.cache.exits)
-		d.cache.mu.RUnlock()
-		return peers, nil
-	}
-	d.cache.mu.RUnlock()
-
-	// 重新发现
-	peers, err := d.findProviders(ctx, ExitServiceNamespace)
-	if err != nil {
-		return nil, err
-	}
-
-	// 更新缓存
-	d.cache.mu.Lock()
-	d.cache.exits = peers
-	d.cache.exitTTL = time.Now().Add(CacheRefreshInterval)
-	d.cache.mu.Unlock()
-
-	return peers, nil
-}
-
 // GetCachedRelays 获取缓存的 Relay 节点
 func (d *Discovery) GetCachedRelays() []peer.AddrInfo {
 	d.cache.mu.RLock()
@@ -216,26 +164,9 @@ func (d *Discovery) GetCachedRelays() []peer.AddrInfo {
 	return peers
 }
 
-// GetCachedExits 获取缓存的 Exit 节点
-func (d *Discovery) GetCachedExits() []peer.AddrInfo {
-	d.cache.mu.RLock()
-	defer d.cache.mu.RUnlock()
-
-	peers := make([]peer.AddrInfo, len(d.cache.exits))
-	copy(peers, d.cache.exits)
-	return peers
-}
-
 // RelayCount 返回已发现的 Relay 数量
 func (d *Discovery) RelayCount() int {
 	d.cache.mu.RLock()
 	defer d.cache.mu.RUnlock()
 	return len(d.cache.relays)
-}
-
-// ExitCount 返回已发现的 Exit 数量
-func (d *Discovery) ExitCount() int {
-	d.cache.mu.RLock()
-	defer d.cache.mu.RUnlock()
-	return len(d.cache.exits)
 }

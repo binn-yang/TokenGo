@@ -1,19 +1,16 @@
+# TokenGo Relay 配置
+# 私有 DHT 网络模式
+
 listen: ":4433"
 tls:
   cert_file: "./certs/cert.pem"
   key_file: "./certs/key.pem"
+
 dht:
-  enabled: true
-  bootstrap_peers:
-    - "/dnsaddr/sg1.bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt"
-    - "/dnsaddr/sv15.bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN"
-    - "/dnsaddr/am6.bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb"
-    - "/dnsaddr/ny5.bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa"
   listen_addrs:
     - "/ip4/0.0.0.0/tcp/4003"
   external_addrs:
-    - "/ip4/43.156.60.67/udp/4433"  # QUIC 服务地址，通过 DHT 广播供 Exit 发现
-
+    - "/ip4/43.156.60.67/udp/4433"  # QUIC 服务地址，通过 DHT 广播
   private_key_file: "./keys/relay_identity.key/identity.key"
   mode: "server"
-  use_ipfs_bootstrap: false
+  # bootstrap_peers 可选，默认使用内置列表

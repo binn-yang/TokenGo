@@ -1,18 +1,10 @@
 # TokenGo Client 配置
-# 默认使用公共 IPFS DHT 发现节点，无需配置
+# 私有 DHT 网络自动发现节点，通常无需配置
 
 listen: "127.0.0.1:8080"
 timeout: 30s
 insecure_skip_verify: false
 
-# DHT 配置 (默认启用公共 IPFS Bootstrap)
-dht:
-  enabled: true
-  use_ipfs_bootstrap: true
-  listen_addrs:
-    - "/ip4/0.0.0.0/tcp/0"
-
-# Bootstrap API (可选)
-# bootstrap:
-#   url: "https://bootstrap.example.com"
-#   interval: 2m
+# 自定义引导节点 (可选，覆盖内置默认值)
+# bootstrap_peers:
+#   - "/ip4/43.156.60.67/udp/4433/p2p/12D3KooW..."
