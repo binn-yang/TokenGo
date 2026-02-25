@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/binn/tokengo/internal/cert"
 	"github.com/binn/tokengo/internal/dht"
 	"github.com/binn/tokengo/internal/netutil"
 	"github.com/binn/tokengo/internal/protocol"
@@ -23,30 +24,24 @@ type TunnelClient struct {
 	staticRelayAddr string // 静态 Relay 地址（用于 serve 命令）
 	pubKeyHash      string
 	keyConfig       []byte // OHTTP KeyConfig (注册时发送给 Relay)
-	tlsConfig       *tls.Config
 	ohttpHandler    *OHTTPHandler
 	conn            quic.Connection
 	connMu          sync.Mutex
 	ctx             context.Context
 	cancel          context.CancelFunc
 	activeRelayAddr string
+	currentRelayID  peer.ID
 	ready           chan struct{}
 	readyOnce       sync.Once
 }
 
 // NewTunnelClient 创建反向隧道客户端（DHT 发现模式）
-func NewTunnelClient(discovery *dht.Discovery, pubKeyHash string, keyConfig []byte, ohttpHandler *OHTTPHandler, insecureSkipVerify bool) *TunnelClient {
-	tlsConfig := &tls.Config{
-		NextProtos:         []string{"tokengo-exit"},
-		InsecureSkipVerify: insecureSkipVerify,
-		MinVersion:         tls.VersionTLS13,
-	}
+func NewTunnelClient(discovery *dht.Discovery, pubKeyHash string, keyConfig []byte, ohttpHandler *OHTTPHandler) *TunnelClient {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &TunnelClient{
 		discovery:    discovery,
 		pubKeyHash:   pubKeyHash,
 		keyConfig:    keyConfig,
-		tlsConfig:    tlsConfig,
 		ohttpHandler: ohttpHandler,
 		ctx:          ctx,
 		cancel:       cancel,
@@ -55,18 +50,12 @@ func NewTunnelClient(discovery *dht.Discovery, pubKeyHash string, keyConfig []by
 }
 
 // NewTunnelClientStatic 创建反向隧道客户端（静态地址模式，用于 serve 命令）
-func NewTunnelClientStatic(relayAddr string, pubKeyHash string, keyConfig []byte, ohttpHandler *OHTTPHandler, insecureSkipVerify bool) *TunnelClient {
-	tlsConfig := &tls.Config{
-		NextProtos:         []string{"tokengo-exit"},
-		InsecureSkipVerify: insecureSkipVerify,
-		MinVersion:         tls.VersionTLS13,
-	}
+func NewTunnelClientStatic(relayAddr string, pubKeyHash string, keyConfig []byte, ohttpHandler *OHTTPHandler) *TunnelClient {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &TunnelClient{
 		staticRelayAddr: relayAddr,
 		pubKeyHash:      pubKeyHash,
 		keyConfig:       keyConfig,
-		tlsConfig:       tlsConfig,
 		ohttpHandler:    ohttpHandler,
 		ctx:             ctx,
 		cancel:          cancel,
@@ -88,7 +77,7 @@ func (t *TunnelClient) Start(ctx context.Context) error {
 		}
 
 		// 选择最佳 Relay
-		addr, err := t.selectRelay(ctx)
+		addr, peerID, err := t.selectRelay(ctx)
 		if err != nil {
 			log.Printf("选择 Relay 失败: %v，%v 后重试...", err, backoff)
 			select {
@@ -103,7 +92,7 @@ func (t *TunnelClient) Start(ctx context.Context) error {
 		log.Printf("选择 Relay: %s", addr)
 
 		// 连接并注册
-		if err := t.connectAndRegister(ctx, addr); err != nil {
+		if err := t.connectAndRegister(ctx, addr, peerID); err != nil {
 			log.Printf("连接 Relay %s 失败: %v，%v 后重试...", addr, err, backoff)
 			select {
 			case <-time.After(backoff):
@@ -115,6 +104,7 @@ func (t *TunnelClient) Start(ctx context.Context) error {
 		}
 
 		log.Printf("已注册到 Relay %s (pubKeyHash=%s)", addr, t.pubKeyHash)
+		t.currentRelayID = peerID
 		t.readyOnce.Do(func() { close(t.ready) })
 		break
 	}
@@ -143,23 +133,23 @@ func (t *TunnelClient) Start(ctx context.Context) error {
 }
 
 // selectRelay 选择 Relay 节点（静态地址或 DHT 发现）
-func (t *TunnelClient) selectRelay(ctx context.Context) (string, error) {
+func (t *TunnelClient) selectRelay(ctx context.Context) (string, peer.ID, error) {
 	// 静态模式（用于 serve 命令）
 	if t.staticRelayAddr != "" {
-		return t.staticRelayAddr, nil
+		return t.staticRelayAddr, "", nil
 	}
 
 	// DHT 发现模式
 	if t.discovery == nil {
-		return "", fmt.Errorf("DHT 未启用，无法发现 Relay 节点")
+		return "", "", fmt.Errorf("DHT 未启用，无法发现 Relay 节点")
 	}
 
 	relays, err := t.discovery.DiscoverRelays(ctx)
 	if err != nil {
-		return "", fmt.Errorf("DHT 发现 Relay 失败: %w", err)
+		return "", "", fmt.Errorf("DHT 发现 Relay 失败: %w", err)
 	}
 	if len(relays) == 0 {
-		return "", fmt.Errorf("DHT 未发现任何 Relay 节点")
+		return "", "", fmt.Errorf("DHT 未发现任何 Relay 节点")
 	}
 
 	log.Printf("从 DHT 发现 %d 个 Relay 节点", len(relays))
@@ -169,8 +159,9 @@ func (t *TunnelClient) selectRelay(ctx context.Context) (string, error) {
 }
 
 // selectBestRelay 从 DHT 发现的 Relay 中选择延迟最低的
-func (t *TunnelClient) selectBestRelay(ctx context.Context, relays []peer.AddrInfo) (string, error) {
+func (t *TunnelClient) selectBestRelay(ctx context.Context, relays []peer.AddrInfo) (string, peer.ID, error) {
 	var bestAddr string
+	var bestPeerID peer.ID
 	var bestRTT time.Duration
 
 	for _, relay := range relays {
@@ -179,7 +170,7 @@ func (t *TunnelClient) selectBestRelay(ctx context.Context, relays []peer.AddrIn
 			continue
 		}
 
-		rtt, err := t.probeRelay(ctx, addr)
+		rtt, err := t.probeRelay(ctx, addr, relay.ID)
 		if err != nil {
 			log.Printf("探测 Relay %s 失败: %v", addr, err)
 			continue
@@ -188,20 +179,24 @@ func (t *TunnelClient) selectBestRelay(ctx context.Context, relays []peer.AddrIn
 		log.Printf("Relay %s RTT: %v", addr, rtt)
 		if bestAddr == "" || rtt < bestRTT {
 			bestAddr = addr
+			bestPeerID = relay.ID
 			bestRTT = rtt
 		}
 	}
 
 	if bestAddr == "" {
-		return "", fmt.Errorf("所有 Relay 节点均不可达")
+		return "", "", fmt.Errorf("所有 Relay 节点均不可达")
 	}
-	return bestAddr, nil
+	return bestAddr, bestPeerID, nil
 }
 
 // probeRelay 探测 Relay 的 RTT (QUIC 握手时间)
-func (t *TunnelClient) probeRelay(ctx context.Context, addr string) (time.Duration, error) {
+func (t *TunnelClient) probeRelay(ctx context.Context, addr string, peerID peer.ID) (time.Duration, error) {
+	// 使用 PeerID 验证的 TLS 配置
+	tlsConfig := cert.CreatePeerIDVerifyTLSConfig(peerID)
+
 	start := time.Now()
-	probeConn, err := quic.DialAddr(ctx, addr, t.tlsConfig, &quic.Config{})
+	probeConn, err := quic.DialAddr(ctx, addr, tlsConfig, &quic.Config{})
 	rtt := time.Since(start)
 	if err != nil {
 		return 0, err
@@ -211,9 +206,23 @@ func (t *TunnelClient) probeRelay(ctx context.Context, addr string) (time.Durati
 }
 
 // connectAndRegister 连接到 Relay 并发送注册消息
-func (t *TunnelClient) connectAndRegister(ctx context.Context, addr string) error {
+func (t *TunnelClient) connectAndRegister(ctx context.Context, addr string, peerID peer.ID) error {
+	// 根据是否有 PeerID 选择 TLS 配置
+	var tlsConfig *tls.Config
+	if peerID != "" {
+		// 使用 PeerID 验证证书
+		tlsConfig = cert.CreatePeerIDVerifyTLSConfig(peerID)
+	} else {
+		// 静态模式，跳过证书验证
+		tlsConfig = &tls.Config{
+			InsecureSkipVerify: true,
+			NextProtos:         []string{"tokengo-exit"},
+			MinVersion:         tls.VersionTLS13,
+		}
+	}
+
 	// 1. 建立 QUIC 连接
-	conn, err := quic.DialAddr(ctx, addr, t.tlsConfig, &quic.Config{
+	conn, err := quic.DialAddr(ctx, addr, tlsConfig, &quic.Config{
 		KeepAlivePeriod: 10 * time.Second,
 		MaxIdleTimeout:  60 * time.Second,
 	})
@@ -425,7 +434,7 @@ func (t *TunnelClient) reconnectLoop(ctx context.Context) {
 			}
 
 			// 重新选择 Relay
-			addr, err := t.selectRelay(ctx)
+			addr, peerID, err := t.selectRelay(ctx)
 			if err != nil {
 				log.Printf("选择 Relay 失败: %v", err)
 				backoff = nextBackoff(backoff, maxBackoff)
@@ -433,13 +442,14 @@ func (t *TunnelClient) reconnectLoop(ctx context.Context) {
 			}
 
 			// 连接并注册
-			if err := t.connectAndRegister(ctx, addr); err != nil {
+			if err := t.connectAndRegister(ctx, addr, peerID); err != nil {
 				log.Printf("重连 Relay %s 失败: %v", addr, err)
 				backoff = nextBackoff(backoff, maxBackoff)
 				continue
 			}
 
 			log.Printf("重连成功，已重新注册到 Relay %s", addr)
+			t.currentRelayID = peerID
 
 			// 重连成功，重新启动心跳和流接收
 			// 在锁保护下捕获 conn 值，避免数据竞争

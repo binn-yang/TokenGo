@@ -10,8 +10,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/binn/tokengo/internal/cert"
 	"github.com/binn/tokengo/internal/config"
 	"github.com/binn/tokengo/internal/dht"
+	"github.com/binn/tokengo/internal/identity"
 )
 
 // RelayNode 中继节点
@@ -27,27 +29,6 @@ type RelayNode struct {
 
 // New 创建中继节点
 func New(cfg *config.RelayConfig) (*RelayNode, error) {
-	// 加载 TLS 证书
-	if cfg.TLS.CertFile == "" || cfg.TLS.KeyFile == "" {
-		return nil, fmt.Errorf("TLS 证书配置缺失")
-	}
-
-	cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("加载 TLS 证书失败: %w", err)
-	}
-
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		NextProtos:   []string{"tokengo-relay", "tokengo-exit"}, // 支持 Client 和 Exit 两种 ALPN
-		MinVersion:   tls.VersionTLS13,
-	}
-
-	// 警告：如果启用了不安全模式
-	if cfg.InsecureSkipVerify {
-		log.Println("警告: TLS 证书验证已禁用，仅用于开发环境！")
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 
 	node := &RelayNode{
@@ -56,11 +37,55 @@ func New(cfg *config.RelayConfig) (*RelayNode, error) {
 		cancel: cancel,
 	}
 
-	// 创建 Exit 注册表（替代原有的 Forwarder）
+	// 创建 Exit 注册表
 	node.registry = NewRegistry()
 
+	// 加载或创建 DHT 身份
+	var id*identity.Identity
+	var err error
+
+	if cfg.DHT.PrivateKeyFile != "" {
+		id, err = identity.LoadOrGenerate(cfg.DHT.PrivateKeyFile)
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("加载 DHT 身份失败: %w", err)
+		}
+	} else {
+		// 如果没有配置身份密钥，生成临时身份
+		id, err = identity.Generate()
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("生成 DHT 身份失败: %w", err)
+		}
+	}
+
+	// 生成绑定 PeerID 的 TLS 证书
+	var tlsCert *tls.Certificate
+	if cfg.TLS.CertFile != "" && cfg.TLS.KeyFile != "" {
+		// 使用配置的证书文件
+		cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("加载 TLS 证书失败: %w", err)
+		}
+		tlsCert = &cert
+	} else {
+		// 自动生成证书（绑定 PeerID）
+		tlsCert, err = cert.GeneratePeerIDCert(id.PrivKey, "./certs")
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("生成 TLS 证书失败: %w", err)
+		}
+		log.Printf("已自动生成 TLS 证书 (PeerID: %s)", id.PeerID)
+	}
+
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{*tlsCert},
+		NextProtos:   []string{"tokengo-relay", "tokengo-exit"},
+		MinVersion:   tls.VersionTLS13,
+	}
+
 	// DHT 始终启用（私有网络）
-	// 如果配置了 DHT 相关字段，则启动 DHT 节点
 	if len(cfg.DHT.ListenAddrs) > 0 || cfg.DHT.PrivateKeyFile != "" {
 		dhtCfg := &dht.Config{
 			PrivateKeyPath: cfg.DHT.PrivateKeyFile,

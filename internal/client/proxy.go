@@ -31,11 +31,6 @@ type LocalProxy struct {
 
 // NewLocalProxy 创建本地代理
 func NewLocalProxy(cfg *config.ClientConfig) (*LocalProxy, error) {
-	// 警告：如果启用了不安全模式
-	if cfg.InsecureSkipVerify {
-		log.Println("警告: TLS 证书验证已禁用，仅用于开发环境！")
-	}
-
 	proxy := &LocalProxy{
 		cfg:      cfg,
 		progress: NewConsoleProgress(),
@@ -56,7 +51,7 @@ func NewLocalProxy(cfg *config.ClientConfig) (*LocalProxy, error) {
 	proxy.dhtNode = dhtNode
 
 	// 创建 Client（不预设 Relay/Exit，后续动态发现）
-	client, err := NewClientDynamic(cfg.InsecureSkipVerify)
+	client, err := NewClientDynamic()
 	if err != nil {
 		proxy.dhtNode.Stop()
 		return nil, fmt.Errorf("创建客户端失败: %w", err)
@@ -67,15 +62,14 @@ func NewLocalProxy(cfg *config.ClientConfig) (*LocalProxy, error) {
 }
 
 // NewStaticProxy 创建静态模式代理 (用于 serve 命令)
-func NewStaticProxy(listen, relayAddr string, keyID uint8, publicKey []byte, insecureSkipVerify bool) (*LocalProxy, error) {
-	client, err := NewClient(relayAddr, keyID, publicKey, insecureSkipVerify)
+func NewStaticProxy(listen, relayAddr string, keyID uint8, publicKey []byte, _ bool) (*LocalProxy, error) {
+	client, err := NewClient(relayAddr, keyID, publicKey)
 	if err != nil {
 		return nil, fmt.Errorf("创建客户端失败: %w", err)
 	}
 
 	cfg := &config.ClientConfig{
-		Listen:             listen,
-		InsecureSkipVerify: insecureSkipVerify,
+		Listen: listen,
 	}
 
 	return &LocalProxy{

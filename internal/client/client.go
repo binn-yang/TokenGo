@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/binn/tokengo/internal/cert"
 	"github.com/binn/tokengo/internal/crypto"
 	"github.com/binn/tokengo/internal/dht"
 	"github.com/binn/tokengo/internal/loadbalancer"
@@ -27,46 +28,31 @@ type Client struct {
 	ohttpClient    *crypto.OHTTPClient
 	conn           quic.Connection
 	connMu         sync.Mutex
-	tlsConfig      *tls.Config
 	dhtNode        *dht.Node
 	discovery      *dht.Discovery
 	selector       loadbalancer.Selector
 	currentRelayID peer.ID
 }
 
-// NewClient 创建客户端 (静态模式)
-func NewClient(relayAddr string, keyID uint8, exitPublicKey []byte, insecureSkipVerify bool) (*Client, error) {
+// NewClient 创建客户端 (静态模式，跳过 PeerID 验证)
+func NewClient(relayAddr string, keyID uint8, exitPublicKey []byte) (*Client, error) {
 	ohttpClient, err := crypto.NewOHTTPClient(keyID, exitPublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("创建 OHTTP 客户端失败: %w", err)
-	}
-
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: insecureSkipVerify,
-		NextProtos:         []string{"tokengo-relay"},
-		MinVersion:         tls.VersionTLS13,
 	}
 
 	return &Client{
 		relayAddr:      relayAddr,
 		exitPubKeyHash: crypto.PubKeyHash(exitPublicKey),
 		ohttpClient:    ohttpClient,
-		tlsConfig:      tlsConfig,
 		selector:       loadbalancer.NewWeightedSelector(),
 	}, nil
 }
 
 // NewClientDynamic 创建动态发现模式的客户端（不预设 Relay/Exit）
-func NewClientDynamic(insecureSkipVerify bool) (*Client, error) {
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: insecureSkipVerify,
-		NextProtos:         []string{"tokengo-relay"},
-		MinVersion:         tls.VersionTLS13,
-	}
-
+func NewClientDynamic() (*Client, error) {
 	return &Client{
-		tlsConfig: tlsConfig,
-		selector:  loadbalancer.NewWeightedSelector(),
+		selector: loadbalancer.NewWeightedSelector(),
 	}, nil
 }
 
@@ -132,6 +118,7 @@ func (c *Client) SetDiscovery(d *dht.Discovery) {
 }
 
 // connectToAddr 连接到指定地址
+// 如果peerID 不为空，则验证证书中的 PeerID
 func (c *Client) connectToAddr(ctx context.Context, addr string, peerID peer.ID) error {
 	if addr == "" {
 		return fmt.Errorf("Relay 地址为空")
@@ -142,7 +129,21 @@ func (c *Client) connectToAddr(ctx context.Context, addr string, peerID peer.ID)
 		KeepAlivePeriod: 30_000_000_000,  // 30 秒
 	}
 
-	conn, err := quic.DialAddr(ctx, addr, c.tlsConfig, quicConfig)
+	// 根据是否有 PeerID 选择 TLS 配置
+	var tlsConfig *tls.Config
+	if peerID != "" {
+		// 使用 PeerID 验证证书
+		tlsConfig = cert.CreatePeerIDVerifyTLSConfig(peerID)
+	} else {
+		// 静态模式，跳过证书验证
+		tlsConfig = &tls.Config{
+			InsecureSkipVerify: true,
+			NextProtos:         []string{"tokengo-relay"},
+			MinVersion:         tls.VersionTLS13,
+		}
+	}
+
+	conn, err := quic.DialAddr(ctx, addr, tlsConfig, quicConfig)
 	if err != nil {
 		return fmt.Errorf("连接 Relay 失败: %w", err)
 	}
