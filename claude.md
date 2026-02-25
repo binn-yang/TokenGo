@@ -7,7 +7,7 @@ TokenGo 是一个去中心化 AI API 网关，通过 OHTTP (Oblivious HTTP, RFC 
 ## 当前状态
 
 - **版本**: 0.1.0
-- **状态**: MVP 可用，Docker 集成测试通过
+- **状态**: MVP 可用
 
 ## 架构设计
 
@@ -152,7 +152,6 @@ DHTConfig {
 | `configs/client.yaml` | Client 配置（DHT 发现 + Bootstrap API） |
 | `configs/relay-dht.yaml` | Relay 配置（DHT 注册） |
 | `configs/exit-dht.yaml` | Exit 配置（DHT 发现 Relay） |
-| `configs/docker/` | Docker 环境专用配置 |
 
 ```yaml
 # configs/client.yaml
@@ -304,22 +303,6 @@ tokengo relay --config configs/relay-dht.yaml
 tokengo client
 ```
 
-## Docker 部署
-
-### docker-compose.yml
-
-包含 4 个服务：ollama、exit、relay、client。
-
-### 测试
-
-```bash
-make docker-test    # 完整集成测试
-make docker-up      # 启动服务
-make docker-down    # 停止服务
-make docker-logs    # 查看日志
-make docker-clean   # 清理资源
-```
-
 ## 远端服务器
 
 | 服务器 | IP | 用户 | 认证方式 | 项目目录 |
@@ -348,10 +331,6 @@ make build-linux
 原因: Client 获取的公钥与 Exit 节点的私钥不匹配。
 
 解决: 重新运行 `make keygen`，重启 Exit 节点以重新注册 KeyConfig。
-
-### Ollama 健康检查失败
-
-Ollama 容器内没有 curl，已改用 `ollama list` 命令检查。
 
 ## 待办事项
 

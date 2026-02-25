@@ -1,8 +1,0 @@
-listen: ":8443"
-ohttp_private_key_file: "/etc/tokengo/keys/ohttp_private.key"
-ai_backend:
-  url: "http://ollama:11434"  # Docker service name
-  api_key: ""
-tls:
-  cert_file: "/etc/tokengo/certs/cert.pem"
-  key_file: "/etc/tokengo/certs/key.pem"

@@ -51,37 +51,6 @@ Client 零配置，自动通过公共 IPFS DHT 发现节点：
 ./build/tokengo client
 ```
 
-### Docker 一键测试
-
-```bash
-# 运行完整的 Docker 集成测试（包含 Ollama）
-make docker-test
-```
-
-这会自动：
-1. 生成 OHTTP 密钥和 TLS 证书
-2. 构建 Docker 镜像
-3. 启动 Ollama + TokenGo 全链路
-4. 下载 llama3.2:1b 模型
-5. 运行 API 测试
-
-测试成功后，可以直接使用：
-
-```bash
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"llama3.2:1b","messages":[{"role":"user","content":"hello"}]}'
-```
-
-### Docker 管理命令
-
-```bash
-make docker-up      # 启动服务
-make docker-down    # 停止服务
-make docker-logs    # 查看日志
-make docker-clean   # 清理资源
-```
-
 ### 本地开发
 
 #### 1. 安装依赖
@@ -143,7 +112,7 @@ make certs
 
 ## 性能测试
 
-在 Docker 环境下的延迟测试结果：
+延迟测试结果：
 
 | 方式 | 纯网络延迟 | 含推理延迟 |
 |------|-----------|-----------|
@@ -194,10 +163,7 @@ TokenGo/
 │   └── identity/      # 节点身份
 ├── pkg/openai/        # OpenAI API 兼容层
 ├── configs/           # 配置文件
-│   └── docker/        # Docker 专用配置
 ├── scripts/           # 脚本
-├── Dockerfile
-└── docker-compose.yml
 ```
 
 ## 技术栈

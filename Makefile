@@ -1,5 +1,4 @@
-.PHONY: all build clean test run-client run-relay run-exit keygen help \
-	docker-build docker-up docker-down docker-logs docker-test docker-clean
+.PHONY: all build clean test run-client run-relay run-exit keygen help
 
 # 版本信息
 VERSION := 0.1.0
@@ -88,43 +87,6 @@ local-test: build certs keygen
 	@echo '  curl http://127.0.0.1:8080/v1/chat/completions \'
 	@echo '    -H "Content-Type: application/json" \'
 	@echo '    -d '\''{"model":"llama2","messages":[{"role":"user","content":"Hello"}]}'\'''
-
-# ==================== Docker 相关命令 ====================
-
-# 构建 Docker 镜像
-docker-build:
-	@echo "构建 Docker 镜像..."
-	docker compose build
-
-# 启动 Docker 服务
-docker-up:
-	@echo "启动 Docker 服务..."
-	docker compose up -d
-	@echo ""
-	@echo "服务已启动，查看状态: docker compose ps"
-	@echo "查看日志: make docker-logs"
-
-# 停止 Docker 服务
-docker-down:
-	@echo "停止 Docker 服务..."
-	docker compose down
-
-# 查看 Docker 日志
-docker-logs:
-	docker compose logs -f
-
-# Docker 集成测试 (一键测试)
-docker-test: certs keygen
-	@echo "运行 Docker 集成测试..."
-	@chmod +x scripts/docker-test.sh
-	@./scripts/docker-test.sh
-
-# 清理 Docker 资源
-docker-clean:
-	@echo "清理 Docker 资源..."
-	docker compose down -v --rmi local
-	@echo "已清理容器、网络、卷和本地镜像"
-
 # ==================== 帮助 ====================
 
 # 帮助
@@ -143,13 +105,5 @@ help:
 	@echo "  make run-relay   - 运行中继节点"
 	@echo "  make run-exit    - 运行出口节点"
 	@echo "  make local-test  - 准备本地测试环境"
-	@echo ""
-	@echo "Docker 命令:"
-	@echo "  make docker-build - 构建 Docker 镜像"
-	@echo "  make docker-up    - 启动 Docker 服务"
-	@echo "  make docker-down  - 停止 Docker 服务"
-	@echo "  make docker-logs  - 查看 Docker 日志"
-	@echo "  make docker-test  - Docker 集成测试 (推荐)"
-	@echo "  make docker-clean - 清理 Docker 资源"
 	@echo ""
 	@echo "  make help        - 显示帮助"
