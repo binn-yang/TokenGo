@@ -10,4 +10,6 @@ dht:
     - "/ip4/0.0.0.0/tcp/4002"
   private_key_file: "./keys/exit_identity.key/identity.key"
   mode: "server"
-  # bootstrap_peers 可选，默认使用内置列表
+  # 同一服务器时使用本地地址连接 Relay
+  bootstrap_peers:
+    - "/ip4/127.0.0.1/tcp/4003/p2p/12D3KooWCjYH5XUjVRi6DymRZpLj2pDAFxnK3xJ8gcJQMgswT6fU"
