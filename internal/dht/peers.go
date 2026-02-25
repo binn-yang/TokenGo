@@ -15,10 +15,10 @@ import (
 )
 
 // DefaultBootstrapPeers 硬编码的默认 bootstrap peers (编译进二进制)
-// 这些是已部署的 Relay 节点地址，作为网络入口
+// 这些是已部署的 Relay 节点 DHT 地址，作为网络入口
 var DefaultBootstrapPeers = []string{
-	// 主服务器 (43.156.60.67)
-	"/ip4/43.156.60.67/udp/4433/p2p/12D3KooWCjYH5XUjVRi6DymRZpLj2pDAFxnK3xJ8gcJQMgswT6fU",
+	// 主服务器 DHT 端口 (43.156.60.67:4003)
+	"/ip4/43.156.60.67/tcp/4003/p2p/12D3KooWCjYH5XUjVRi6DymRZpLj2pDAFxnK3xJ8gcJQMgswT6fU",
 }
 
 // bootstrapJSONURLs GitHub JSON 文件 URL (主 URL + 镜像)
