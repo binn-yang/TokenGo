@@ -59,25 +59,13 @@ func New(cfg *config.RelayConfig) (*RelayNode, error) {
 		}
 	}
 
-	// 生成绑定 PeerID 的 TLS 证书
-	var tlsCert *tls.Certificate
-	if cfg.TLS.CertFile != "" && cfg.TLS.KeyFile != "" {
-		// 使用配置的证书文件
-		cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
-		if err != nil {
-			cancel()
-			return nil, fmt.Errorf("加载 TLS 证书失败: %w", err)
-		}
-		tlsCert = &cert
-	} else {
-		// 自动生成证书（绑定 PeerID）
-		tlsCert, err = cert.GeneratePeerIDCert(id.PrivKey, "./certs")
-		if err != nil {
-			cancel()
-			return nil, fmt.Errorf("生成 TLS 证书失败: %w", err)
-		}
-		log.Printf("已自动生成 TLS 证书 (PeerID: %s)", id.PeerID)
+	// 生成绑定 PeerID 的 TLS 证书（自动生成）
+	tlsCert, err := cert.GeneratePeerIDCert(id.PrivKey, "./certs")
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("生成 TLS 证书失败: %w", err)
 	}
+	log.Printf("已自动生成 TLS 证书 (PeerID: %s)", id.PeerID)
 
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{*tlsCert},

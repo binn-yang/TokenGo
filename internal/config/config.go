@@ -10,33 +10,25 @@ import (
 
 // ClientConfig 客户端配置
 type ClientConfig struct {
-	Listen             string        `yaml:"listen"`
-	Timeout            time.Duration `yaml:"timeout"`
-	InsecureSkipVerify bool          `yaml:"insecure_skip_verify"` // 仅开发环境使用
-	BootstrapPeers     []string      `yaml:"bootstrap_peers,omitempty"` // 可选，覆盖内置默认值
+	Listen         string        `yaml:"listen"`
+	Timeout        time.Duration `yaml:"timeout"`
+	BootstrapPeers []string      `yaml:"bootstrap_peers,omitempty"` // 可选，覆盖内置默认值
 }
 
 // RelayConfig 中继节点配置 (盲转发模式)
+// TLS 证书自动生成（绑定 PeerID），无需配置
 type RelayConfig struct {
-	Listen             string    `yaml:"listen"`
-	TLS                TLSConfig `yaml:"tls"`
-	InsecureSkipVerify bool      `yaml:"insecure_skip_verify"` // 仅开发环境使用
-	DHT                DHTConfig `yaml:"dht,omitempty"`
+	Listen string    `yaml:"listen"`
+	DHT    DHTConfig `yaml:"dht,omitempty"`
 }
 
 // ExitConfig 出口节点配置
+// TLS 证书验证通过 PeerID 自动完成，无需配置 insecure_skip_verify
 type ExitConfig struct {
 	OHTTPPrivateKeyFile string    `yaml:"ohttp_private_key_file"`
 	OHTTPPublicKeyFile  string    `yaml:"ohttp_public_key_file,omitempty"` // 可选，默认为私钥文件 + ".pub"
 	AIBackend           AIBackend `yaml:"ai_backend"`
-	InsecureSkipVerify  bool      `yaml:"insecure_skip_verify"` // 仅开发环境使用
 	DHT                 DHTConfig `yaml:"dht,omitempty"`
-}
-
-// TLSConfig TLS 证书配置
-type TLSConfig struct {
-	CertFile string `yaml:"cert_file"`
-	KeyFile  string `yaml:"key_file"`
 }
 
 // AIBackend AI 后端配置

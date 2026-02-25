@@ -62,7 +62,7 @@ func NewLocalProxy(cfg *config.ClientConfig) (*LocalProxy, error) {
 }
 
 // NewStaticProxy 创建静态模式代理 (用于 serve 命令)
-func NewStaticProxy(listen, relayAddr string, keyID uint8, publicKey []byte, _ bool) (*LocalProxy, error) {
+func NewStaticProxy(listen, relayAddr string, keyID uint8, publicKey []byte) (*LocalProxy, error) {
 	client, err := NewClient(relayAddr, keyID, publicKey)
 	if err != nil {
 		return nil, fmt.Errorf("创建客户端失败: %w", err)

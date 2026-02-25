@@ -1,9 +1,10 @@
 # TokenGo Client 配置
-# 私有 DHT 网络自动发现节点，通常无需配置
+# 私有 DHT 网络自动发现节点，零配置启动
 
 listen: "127.0.0.1:8080"
 timeout: 30s
-insecure_skip_verify: true  # 开发环境使用自签名证书
+
+# TLS 证书自动验证（通过 PeerID），无需配置 insecure_skip_verify
 
 # 自定义引导节点 (可选，覆盖内置默认值)
 # bootstrap_peers:

@@ -2,9 +2,12 @@
 # 私有 DHT 网络模式
 
 listen: ":4433"
-tls:
-  cert_file: "./certs/cert.pem"
-  key_file: "./certs/key.pem"
+
+# TLS 证书自动生成（绑定 PeerID），无需配置
+# 可选：手动指定证书文件
+# tls:
+#   cert_file: "./certs/cert.pem"
+#   key_file: "./certs/key.pem"
 
 dht:
   listen_addrs:
