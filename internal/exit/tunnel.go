@@ -77,7 +77,7 @@ func (t *TunnelClient) Start(ctx context.Context) error {
 		}
 
 		// 选择最佳 Relay
-		addr, peerID, err := t.selectRelay(ctx)
+		addr, peerID, err := t.selectRelay(t.ctx)
 		if err != nil {
 			log.Printf("选择 Relay 失败: %v，%v 后重试...", err, backoff)
 			select {
@@ -92,7 +92,7 @@ func (t *TunnelClient) Start(ctx context.Context) error {
 		log.Printf("选择 Relay: %s", addr)
 
 		// 连接并注册
-		if err := t.connectAndRegister(ctx, addr, peerID); err != nil {
+		if err := t.connectAndRegister(t.ctx, addr, peerID); err != nil {
 			log.Printf("连接 Relay %s 失败: %v，%v 后重试...", addr, err, backoff)
 			select {
 			case <-time.After(backoff):
@@ -115,7 +115,7 @@ func (t *TunnelClient) Start(ctx context.Context) error {
 	conn := t.conn
 	t.connMu.Unlock()
 
-	connCtx, connCancel := context.WithCancel(ctx)
+	connCtx, connCancel := context.WithCancel(t.ctx)
 	go func() {
 		// 当 QUIC 连接断开或 Stop() 被调用时取消 connCtx
 		select {
@@ -128,7 +128,7 @@ func (t *TunnelClient) Start(ctx context.Context) error {
 	go t.acceptStreams(connCtx, conn)
 
 	// 3. 启动重连循环 (阻塞)
-	t.reconnectLoop(ctx)
+	t.reconnectLoop()
 	return nil
 }
 
@@ -396,7 +396,7 @@ func (t *TunnelClient) sendHeartbeat(ctx context.Context) error {
 }
 
 // reconnectLoop 等待连接断开后进行指数退避重连
-func (t *TunnelClient) reconnectLoop(ctx context.Context) {
+func (t *TunnelClient) reconnectLoop() {
 	for {
 		// 等待当前连接断开
 		t.connMu.Lock()
@@ -434,7 +434,7 @@ func (t *TunnelClient) reconnectLoop(ctx context.Context) {
 			}
 
 			// 重新选择 Relay
-			addr, peerID, err := t.selectRelay(ctx)
+			addr, peerID, err := t.selectRelay(t.ctx)
 			if err != nil {
 				log.Printf("选择 Relay 失败: %v", err)
 				backoff = nextBackoff(backoff, maxBackoff)
@@ -442,7 +442,7 @@ func (t *TunnelClient) reconnectLoop(ctx context.Context) {
 			}
 
 			// 连接并注册
-			if err := t.connectAndRegister(ctx, addr, peerID); err != nil {
+			if err := t.connectAndRegister(t.ctx, addr, peerID); err != nil {
 				log.Printf("重连 Relay %s 失败: %v", addr, err)
 				backoff = nextBackoff(backoff, maxBackoff)
 				continue
@@ -457,7 +457,7 @@ func (t *TunnelClient) reconnectLoop(ctx context.Context) {
 			conn := t.conn
 			t.connMu.Unlock()
 
-			connCtx, connCancel := context.WithCancel(ctx)
+			connCtx, connCancel := context.WithCancel(t.ctx)
 			go func() {
 				// 当 QUIC 连接断开或 Stop() 被调用时取消 connCtx
 				select {

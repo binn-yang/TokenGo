@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/binn/tokengo/internal/cert"
 	"github.com/binn/tokengo/internal/crypto"
@@ -27,7 +28,8 @@ type Client struct {
 	exitPubKeyHash string // Exit 公钥哈希 (由 Client 指定，Relay 盲转发)
 	ohttpClient    *crypto.OHTTPClient
 	conn           quic.Connection
-	connMu         sync.Mutex
+	connMu         sync.Mutex // 保护 conn 字段读写（快速操作）
+	reconnectMu    sync.Mutex // 序列化重连操作（慢操作）
 	dhtNode        *dht.Node
 	discovery      *dht.Discovery
 	selector       loadbalancer.Selector
@@ -56,15 +58,17 @@ func NewClientDynamic() (*Client, error) {
 	}, nil
 }
 
-// connect 连接到 Relay 节点
+// connect 连接到 Relay 节点（调用者需持有 reconnectMu）
 func (c *Client) connect(ctx context.Context) error {
-	// 关闭旧连接（如果存在）
+	// 关闭旧连接
+	c.connMu.Lock()
 	if c.conn != nil {
 		c.conn.CloseWithError(0, "reconnecting")
 		c.conn = nil
 	}
+	c.connMu.Unlock()
 
-	// 如果启用了 DHT 发现
+	// DHT 发现和 QUIC 连接（不持锁）
 	if c.discovery != nil {
 		return c.connectWithDiscovery(ctx)
 	}
@@ -106,7 +110,6 @@ func (c *Client) connectWithDiscovery(ctx context.Context) error {
 	}
 
 	c.selector.ReportSuccess(selected.ID)
-	c.currentRelayID = selected.ID
 	return nil
 }
 
@@ -148,40 +151,63 @@ func (c *Client) connectToAddr(ctx context.Context, addr string, peerID peer.ID)
 		return fmt.Errorf("连接 Relay 失败: %w", err)
 	}
 
+	c.connMu.Lock()
 	c.conn = conn
 	c.relayAddr = addr
 	c.currentRelayID = peerID
+	c.connMu.Unlock()
 	return nil
 }
 
 // Connect 公开的连接方法
 func (c *Client) Connect(ctx context.Context) error {
-	c.connMu.Lock()
-	defer c.connMu.Unlock()
+	c.reconnectMu.Lock()
+	defer c.reconnectMu.Unlock()
 	return c.connect(ctx)
 }
 
-// getConnection 获取或建立连接（已持有锁）
+// getConnection 获取或建立连接
 func (c *Client) getConnection(ctx context.Context) (quic.Connection, error) {
+	// 快速路径：检查现有连接（短暂持锁）
 	c.connMu.Lock()
-	defer c.connMu.Unlock()
-
-	// 检查连接是否有效
 	if c.conn != nil {
 		select {
 		case <-c.conn.Context().Done():
-			// 连接已关闭，需要重新连接
+			// 连接已断开，需要重连
 		default:
-			return c.conn, nil
+			conn := c.conn
+			c.connMu.Unlock()
+			return conn, nil
 		}
 	}
+	c.connMu.Unlock()
 
-	// 重新连接
+	// 慢路径：重连（用 reconnectMu 防止多 goroutine 同时重连）
+	c.reconnectMu.Lock()
+	defer c.reconnectMu.Unlock()
+
+	// Double-check: 等待 reconnectMu 期间可能已有其他 goroutine 完成重连
+	c.connMu.Lock()
+	if c.conn != nil {
+		select {
+		case <-c.conn.Context().Done():
+		default:
+			conn := c.conn
+			c.connMu.Unlock()
+			return conn, nil
+		}
+	}
+	c.connMu.Unlock()
+
+	// 执行重连（不持有 connMu）
 	if err := c.connect(ctx); err != nil {
 		return nil, err
 	}
 
-	return c.conn, nil
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
+	return conn, nil
 }
 
 // SendRequest 发送 HTTP 请求
@@ -217,6 +243,13 @@ func (c *Client) SendRequest(ctx context.Context, req *http.Request) (*http.Resp
 	// 关闭写入端，表示请求发送完成（但保持读取端开放）
 	if err := stream.Close(); err != nil {
 		return nil, fmt.Errorf("关闭写入端失败: %w", err)
+	}
+
+	// 设置读取超时，避免 Decode 无限阻塞
+	if deadline, ok := ctx.Deadline(); ok {
+		stream.SetReadDeadline(deadline)
+	} else {
+		stream.SetReadDeadline(time.Now().Add(120 * time.Second))
 	}
 
 	// 读取响应
@@ -303,6 +336,13 @@ func (c *Client) SendStreamRequest(ctx context.Context, req *http.Request) (*Str
 	// 关闭写入端，保持读取端开放
 	if err := stream.Close(); err != nil {
 		return nil, fmt.Errorf("关闭写入端失败: %w", err)
+	}
+
+	// 设置首次 chunk 读取超时
+	if deadline, ok := ctx.Deadline(); ok {
+		stream.SetReadDeadline(deadline)
+	} else {
+		stream.SetReadDeadline(time.Now().Add(120 * time.Second))
 	}
 
 	// 创建流解密器

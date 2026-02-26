@@ -184,7 +184,7 @@ func (s *QUICServer) handleExitConnection(ctx context.Context, conn quic.Connect
 
 	// 6. 心跳监听循环
 	defer func() {
-		s.registry.Remove(pubKeyHash)
+		s.registry.RemoveIfMatch(pubKeyHash, conn)
 		conn.CloseWithError(0, "exit connection closed")
 		log.Printf("Exit %s: 连接已关闭", pubKeyHash)
 	}()

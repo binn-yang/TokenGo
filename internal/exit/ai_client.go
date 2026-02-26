@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -108,7 +109,7 @@ func (c *AIClient) ForwardStream(req *http.Request) (*http.Response, error) {
 // IsSSEResponse 检查响应是否为 SSE 流
 func IsSSEResponse(resp *http.Response) bool {
 	ct := resp.Header.Get("Content-Type")
-	return len(ct) >= 17 && ct[:17] == "text/event-stream"
+	return strings.HasPrefix(strings.ToLower(ct), "text/event-stream")
 }
 
 // hopByHopHeaders 包级变量，避免每次调用时创建新 map
